@@ -222,7 +222,7 @@ async def reindex_company_source(db: AsyncSession, source_id: str, admin_id) -> 
         db,
         source_id=source_id,
         mode="auto",
-        rule={"max_chars": 650, "overlap_chars": 100},
+        rule={"max_chars": 500, "overlap_chars": 100},
         chunks=None,
         admin_id=admin_id,
     )
@@ -938,6 +938,7 @@ async def _run_company_knowledge_validation_pipeline(
         run.answer,
         source,
         [expected_chunk],
+        matches,
     )
     run.correctness_score = evaluation["correctness_score"]
     run.faithfulness_score = evaluation["faithfulness_score"]
@@ -1098,12 +1099,28 @@ async def _evaluate_company_knowledge_answer(
     answer: str,
     source: CompanyKnowledgeSource,
     expected_chunks: list[CompanyKnowledgeChunk],
+    matches: list[RetrievedChunk],
 ) -> dict:
+    expected_evidence = [_chunk_to_evidence(source, chunk) for chunk in expected_chunks]
+    # 检索命中的其他切片也作为参考证据，避免回答引用检索结果却被判不忠实。
+    retrieved_evidence = []
+    for match in matches:
+        if str(match.chunk_id) in {str(chunk.id) for chunk in expected_chunks}:
+            continue
+        retrieved_evidence.append(
+            {
+                "title": match.title,
+                "version": match.version,
+                "section_path": match.section_path,
+                "content": match.content,
+            }
+        )
     response = await gateway.chat(
         build_validation_evaluation_prompt(
             question,
             answer,
-            [_chunk_to_evidence(source, chunk) for chunk in expected_chunks],
+            expected_evidence,
+            retrieved_evidence[:3],
         ),
         system=VALIDATION_EVALUATOR_SYSTEM_PROMPT,
     )
@@ -1263,7 +1280,7 @@ async def _embed_chunks(chunks: list[CompanyKnowledgeChunk]) -> list[list[float]
 
 def _normalize_chunk_rule(rule: dict | None) -> dict:
     incoming = rule or {}
-    max_chars = int(incoming.get("max_chars", 650))
+    max_chars = int(incoming.get("max_chars", 500))
     overlap_chars = int(incoming.get("overlap_chars", 100))
     if max_chars < 120 or overlap_chars < 0 or overlap_chars >= max_chars:
         raise CompanyKnowledgeServiceError("切分长度或重叠长度不合法")
