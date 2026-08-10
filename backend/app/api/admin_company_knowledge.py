@@ -17,6 +17,7 @@ from app.plugins.company_knowledge.graph_service import (
     enqueue_graph_relation_extraction,
     enqueue_graph_relation_extractions_for_published_sources,
     execute_graph_relation_extraction_job,
+    list_graph_relation_extraction_jobs,
     list_relations,
     relation_to_dict,
     update_relation_status,
@@ -717,6 +718,18 @@ async def queue_graph_relation_extractions(
         },
         "已提交存量资料关系草稿任务" if jobs else "没有需要提交的资料，现有任务仍在处理中",
     )
+
+
+@router.get("/graph/extraction-jobs")
+async def list_graph_relation_extraction_jobs_endpoint(
+    limit: int = Query(default=12, ge=1, le=50),
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """查看近期自动关系草稿任务，便于管理员判断生成进度和失败原因。"""
+    del admin
+    jobs = await list_graph_relation_extraction_jobs(db, limit=limit)
+    return ok({"jobs": jobs})
 
 
 @router.delete("/relations/{relation_id}")

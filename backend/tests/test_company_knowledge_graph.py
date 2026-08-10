@@ -11,7 +11,9 @@ from app.plugins.company_knowledge.graph_service import (
     enqueue_graph_relation_extraction,
     enqueue_graph_relation_extractions_for_published_sources,
     execute_graph_relation_extraction_job,
+    graph_extraction_job_to_dict,
     get_confirmed_relations,
+    list_graph_relation_extraction_jobs,
     relation_to_dict,
     validate_relation_input,
 )
@@ -89,6 +91,51 @@ class RelationConversionTests(unittest.TestCase):
     def test_system_supersede_edge_without_replaced(self):
         source = SimpleNamespace(id="new-id", replaced_source_id=None)
         self.assertIsNone(_system_supersede_edge(source))
+
+    def test_graph_extraction_job_to_dict_includes_result_and_source_title(self):
+        job = SimpleNamespace(
+            id="job-1",
+            source_id="source-1",
+            status="succeeded",
+            request_snapshot={
+                "trigger": "publish",
+                "result": {"created": 2, "skipped": 1, "unmatched_count": 3},
+            },
+            error_message="",
+            created_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            started_at=None,
+            finished_at=datetime(2026, 8, 10, 1, tzinfo=timezone.utc),
+        )
+
+        data = graph_extraction_job_to_dict(job, source_title="员工请假制度")
+
+        self.assertEqual(data["source_title"], "员工请假制度")
+        self.assertEqual(data["trigger"], "publish")
+        self.assertEqual(data["result"], {"created": 2, "skipped": 1, "unmatched_count": 3})
+
+
+class GraphExtractionJobListTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_graph_extraction_jobs_joins_source_titles(self):
+        job = SimpleNamespace(
+            id="job-1",
+            source_id="source-1",
+            status="failed",
+            request_snapshot={"trigger": "batch_backfill"},
+            error_message="模型不可用",
+            created_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            started_at=None,
+            finished_at=None,
+        )
+        db = AsyncMock()
+        db.execute.return_value = SimpleNamespace(all=lambda: [(job, "员工请假制度")])
+
+        jobs = await list_graph_relation_extraction_jobs(db, limit=8)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["source_title"], "员工请假制度")
+        self.assertEqual(jobs[0]["status"], "failed")
+        self.assertEqual(jobs[0]["error_message"], "模型不可用")
+        db.execute.assert_awaited_once()
 
 
 class ConfirmedRelationsTests(unittest.IsolatedAsyncioTestCase):

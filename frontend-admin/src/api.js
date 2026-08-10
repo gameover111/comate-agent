@@ -70,6 +70,8 @@ export const apiAdminCompanyKnowledgeDeleteRelation = (relationId) =>
   request(`/company-knowledge/relations/${relationId}`, { method: 'DELETE', body: '{}' })
 export const apiAdminCompanyKnowledgeQueueGraphExtractionJobs = () =>
   request('/company-knowledge/graph/extraction-jobs', { method: 'POST', body: '{}' })
+export const apiAdminCompanyKnowledgeGraphExtractionJobs = (limit = 12) =>
+  request(`/company-knowledge/graph/extraction-jobs?limit=${encodeURIComponent(limit)}`)
 export const apiAdminCompanyKnowledgeExtractRelations = (sourceId) =>
   request(`/company-knowledge/sources/${sourceId}/relations/extract`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeCreateValidationRun = (sourceId, chunkSetId, data) =>
