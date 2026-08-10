@@ -143,43 +143,52 @@ async function loadGraph() {
     if (!res.success) { showNotice(res.message || '图谱加载失败', 'error'); return }
     nodes.value = res.data.nodes || []
     edges.value = res.data.edges || []
-    await renderGraph()
+    renderGraph()
   } catch (error) { showNotice(error.message || '图谱加载失败', 'error') } finally { loading.value = false }
 }
 
+function ensureChart() {
+  if (!chart && graphRef.value) {
+    chart = echarts.init(graphRef.value)
+    chart.on('click', (params) => {
+      if (params.dataType === 'node') selectedNodeId.value = params.data.id
+    })
+  }
+  return chart
+}
+
 function renderGraph() {
-  if (!graphRef.value) return
-  if (chart) { chart.dispose(); chart = null }
-  chart = echarts.init(graphRef.value)
-  chart.setOption({
-    tooltip: { trigger: 'item', formatter: (p) => (p.dataType === 'edge' ? `${p.data.label}` : `<b>${p.data.title}</b><br/>${typeLabel(p.data.knowledge_type)}`) },
-    series: [{
-      type: 'graph',
-      layout: 'force',
-      roam: true,
-      draggable: true,
-      force: { repulsion: 320, edgeLength: [90, 160], gravity: 0.12 },
-      emphasis: { focus: 'adjacency', blurScope: 'coordinateSystem' },
-      label: { show: true, position: 'bottom', fontSize: 11, color: '#555' },
-      data: nodes.value.map((n) => ({
-        id: n.id, title: n.title, knowledge_type: n.knowledge_type,
-        name: n.title, symbolSize: 34,
-        itemStyle: { color: nodeColor(n.knowledge_type) },
-      })),
-      links: edges.value.map((e) => ({
-        source: e.source_id, target: e.target_source_id,
-        label: { show: true, formatter: e.relation_label, fontSize: 10, color: relColor(e.relation_type) },
-        lineStyle: {
-          color: relColor(e.relation_type), width: e.status === 'draft' ? 1.5 : 2.5,
-          type: e.status === 'draft' ? 'dashed' : 'solid',
-        },
-        ...(e.direction === 'directed' ? { symbol: ['none', 'arrow'] } : {}),
-      })),
-    }],
-  })
-  chart.on('click', (params) => {
-    if (params.dataType === 'node') selectedNodeId.value = params.data.id
-  })
+  const instance = ensureChart()
+  if (!instance) return
+  instance.setOption(
+    {
+      tooltip: { trigger: 'item', formatter: (p) => (p.dataType === 'edge' ? `${p.data.label}` : `<b>${p.data.title}</b><br/>${typeLabel(p.data.knowledge_type)}`) },
+      series: [{
+        type: 'graph',
+        layout: 'force',
+        roam: true,
+        draggable: true,
+        force: { repulsion: 320, edgeLength: [90, 160], gravity: 0.12 },
+        emphasis: { focus: 'adjacency', blurScope: 'coordinateSystem' },
+        label: { show: true, position: 'bottom', fontSize: 11, color: '#555' },
+        data: nodes.value.map((n) => ({
+          id: n.id, title: n.title, knowledge_type: n.knowledge_type,
+          name: n.title, symbolSize: 34,
+          itemStyle: { color: nodeColor(n.knowledge_type) },
+        })),
+        links: edges.value.map((e) => ({
+          source: e.source_id, target: e.target_source_id,
+          label: { show: true, formatter: e.relation_label, fontSize: 10, color: relColor(e.relation_type) },
+          lineStyle: {
+            color: relColor(e.relation_type), width: e.status === 'draft' ? 1.5 : 2.5,
+            type: e.status === 'draft' ? 'dashed' : 'solid',
+          },
+          ...(e.direction === 'directed' ? { symbol: ['none', 'arrow'] } : {}),
+        })),
+      }],
+    },
+    { notMerge: true }
+  )
 }
 
 const nodeColor = (t) => ({ policy: '#4A90D9', faq: '#5FBE63', history: '#9B6FD8', news: '#E88D8D', department_knowledge: '#C99A2E' }[t] || '#9B9B9B')
