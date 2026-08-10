@@ -3,11 +3,14 @@
 import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.plugins.company_knowledge.graph_service import (
     GraphServiceError,
     _system_supersede_edge,
+    enqueue_graph_relation_extraction,
+    enqueue_graph_relation_extractions_for_published_sources,
+    execute_graph_relation_extraction_job,
     get_confirmed_relations,
     relation_to_dict,
     validate_relation_input,
@@ -194,6 +197,174 @@ class GraphExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(matched[0]["relation_type"], "cite")
         self.assertEqual(len(unmatched), 1)
         self.assertEqual(unmatched[0]["target_title"], "不存在的制度")
+
+
+class GraphExtractionJobTests(unittest.IsolatedAsyncioTestCase):
+    SOURCE_ID = "11111111-1111-1111-1111-111111111111"
+    JOB_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def _source(self):
+        return SimpleNamespace(id=self.SOURCE_ID, status="published", published_at=None)
+
+    async def test_enqueue_creates_queued_job_for_published_source(self):
+        source = self._source()
+        db = SimpleNamespace(
+            get=AsyncMock(return_value=source),
+            execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: None)),
+            add=MagicMock(),
+            commit=AsyncMock(),
+            refresh=AsyncMock(),
+        )
+
+        job, created = await enqueue_graph_relation_extraction(
+            db,
+            source_id=self.SOURCE_ID,
+            admin_id="admin-1",
+            trigger="publish",
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(job.job_type, "graph_extract")
+        self.assertEqual(job.status, "queued")
+        self.assertEqual(job.request_snapshot, {"trigger": "publish"})
+        db.add.assert_called_once_with(job)
+        db.commit.assert_awaited_once()
+
+    async def test_enqueue_reuses_active_job_for_same_source(self):
+        source = self._source()
+        active_job = SimpleNamespace(id=self.JOB_ID, status="running")
+        db = SimpleNamespace(
+            get=AsyncMock(return_value=source),
+            execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: active_job)),
+            add=MagicMock(),
+            commit=AsyncMock(),
+            refresh=AsyncMock(),
+        )
+
+        job, created = await enqueue_graph_relation_extraction(
+            db,
+            source_id=self.SOURCE_ID,
+            admin_id="admin-1",
+            trigger="manual",
+        )
+
+        self.assertIs(job, active_job)
+        self.assertFalse(created)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
+    async def test_batch_enqueue_skips_active_and_currently_scanned_sources(self):
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        source_a = SimpleNamespace(id="source-a", published_at=now)
+        source_b = SimpleNamespace(id="source-b", published_at=now)
+        source_c = SimpleNamespace(id="source-c", published_at=now)
+        sources_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [source_a, source_b, source_c]))
+        active_result = SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: [SimpleNamespace(source_id="source-b", status="running")])
+        )
+        completed_result = SimpleNamespace(all=lambda: [("source-a", now)])
+        db = SimpleNamespace(
+            execute=AsyncMock(side_effect=[sources_result, active_result, completed_result]),
+            add_all=MagicMock(),
+            commit=AsyncMock(),
+            refresh=AsyncMock(),
+        )
+
+        jobs, skipped = await enqueue_graph_relation_extractions_for_published_sources(
+            db,
+            admin_id="admin-1",
+        )
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].source_id, "source-c")
+        self.assertEqual(jobs[0].request_snapshot, {"trigger": "batch_backfill"})
+        self.assertEqual(skipped, 2)
+        db.add_all.assert_called_once_with(jobs)
+
+    async def test_executor_records_result_without_auto_confirming_relations(self):
+        job = SimpleNamespace(
+            id=self.JOB_ID,
+            source_id=self.SOURCE_ID,
+            job_type="graph_extract",
+            status="queued",
+            requested_by="admin-1",
+            request_snapshot={"trigger": "publish"},
+            error_message="",
+            succeeded_chunks=0,
+            failed_chunks=0,
+            started_at=None,
+            finished_at=None,
+        )
+        source = self._source()
+        db = SimpleNamespace(
+            get=AsyncMock(side_effect=[job, source]),
+            execute=AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: self.JOB_ID)),
+            commit=AsyncMock(),
+            refresh=AsyncMock(),
+            rollback=AsyncMock(),
+        )
+        with patch(
+            "app.plugins.company_knowledge.graph_service.extract_source_relations",
+            AsyncMock(return_value={"created": 2, "skipped": 1, "unmatched": [{"target_title": "未收录制度"}]}),
+        ) as extract:
+            result = await execute_graph_relation_extraction_job(db, job_id=self.JOB_ID)
+
+        self.assertIs(result, job)
+        self.assertEqual(job.status, "succeeded")
+        self.assertEqual(job.succeeded_chunks, 1)
+        self.assertEqual(job.request_snapshot["result"], {"created": 2, "skipped": 1, "unmatched_count": 1})
+        extract.assert_awaited_once_with(db, source_id=self.SOURCE_ID, admin_id="admin-1")
+
+    async def test_executor_cancels_job_when_source_is_no_longer_published(self):
+        job = SimpleNamespace(
+            id=self.JOB_ID,
+            source_id=self.SOURCE_ID,
+            job_type="graph_extract",
+            status="queued",
+            error_message="",
+            finished_at=None,
+        )
+        source = SimpleNamespace(id=self.SOURCE_ID, status="archived")
+        db = SimpleNamespace(get=AsyncMock(side_effect=[job, source]), commit=AsyncMock())
+
+        result = await execute_graph_relation_extraction_job(db, job_id=self.JOB_ID)
+
+        self.assertIs(result, job)
+        self.assertEqual(job.status, "cancelled")
+        self.assertIn("下架", job.error_message)
+
+
+class GraphExtractionPublishEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def test_publish_queues_background_graph_extraction(self):
+        from fastapi import BackgroundTasks
+        from app.api import admin_company_knowledge as api
+
+        source = SimpleNamespace(id="11111111-1111-1111-1111-111111111111")
+        job = SimpleNamespace(id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        background_tasks = BackgroundTasks()
+        db = AsyncMock()
+        with (
+            patch.object(api, "publish_company_source", AsyncMock(return_value=source)),
+            patch.object(api, "enqueue_graph_relation_extraction", AsyncMock(return_value=(job, True))) as enqueue,
+            patch.object(api, "source_to_dict", return_value={"id": str(source.id)}),
+            patch.object(api, "job_to_dict", return_value={"id": str(job.id), "status": "queued"}),
+        ):
+            response = await api.publish_source(
+                str(source.id),
+                background_tasks,
+                admin=SimpleNamespace(id="admin-1"),
+                db=db,
+            )
+
+        self.assertTrue(response["success"])
+        self.assertIn("后台生成关系草稿", response["message"])
+        enqueue.assert_awaited_once_with(
+            db,
+            source_id=response["data"]["source"]["id"],
+            admin_id="admin-1",
+            trigger="publish",
+        )
+        self.assertEqual(len(background_tasks.tasks), 1)
 
 
 class RelatedSourcesTests(unittest.IsolatedAsyncioTestCase):

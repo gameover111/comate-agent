@@ -350,7 +350,7 @@ function chunkSetDisplayStatus(chunkSet) {
   if (chunkSet && detail.value?.source.status === 'published' && detail.value.source.active_chunk_set_id === chunkSet.id) return 'published'
   return chunkSet?.status || ''
 }
-function jobLabel(value) { return ({ convert: '转换 Markdown', auto_chunk: '自动切分', manual_chunk: '手动切分', index: '显式向量化', reindex: '重新索引' }[value] || value) }
+function jobLabel(value) { return ({ convert: '转换 Markdown', auto_chunk: '自动切分', manual_chunk: '手动切分', index: '显式向量化', reindex: '重新索引', graph_extract: '生成关系草稿' }[value] || value) }
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 function formatOptionalSimilarity(value) { return value === null || value === undefined ? '—' : Number(value).toFixed(4) }
 function showNotice(text, type = 'success') { notice.value = { text, type } }

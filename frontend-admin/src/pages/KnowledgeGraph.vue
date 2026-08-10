@@ -3,12 +3,9 @@
     <div class="graph-toolbar">
       <div class="toolbar-left">
         <span class="page-title">知识图谱</span>
-        <select v-model="extractSourceId" class="source-select">
-          <option value="">选择已发布资料（生成关系草稿）</option>
-          <option v-for="node in nodes" :key="node.id" :value="node.id">{{ node.title }} · {{ node.version }}</option>
-        </select>
-        <button class="btn-gold" :disabled="!extractSourceId || extracting" @click="extractRelations">
-          {{ extracting ? '抽取中…' : '抽取关系草稿' }}
+        <span class="toolbar-tip">资料发布后会自动生成关系草稿；可批量补齐存量资料。</span>
+        <button class="btn-gold" :disabled="scanning" @click="queueGraphExtractionJobs">
+          {{ scanning ? '提交中…' : '扫描全部已发布资料' }}
         </button>
         <button class="btn-ghost" :disabled="loading" @click="loadGraph">刷新</button>
       </div>
@@ -20,6 +17,7 @@
         <span class="legend-item dash"><i></i>待确认</span>
       </div>
     </div>
+    <p v-if="notice" :class="['notice', notice.type]">{{ notice.text }}</p>
 
     <div class="graph-body">
       <div ref="graphRef" class="graph-canvas"></div>
@@ -103,8 +101,8 @@ import * as echarts from 'echarts'
 import {
   apiAdminCompanyKnowledgeCreateRelation,
   apiAdminCompanyKnowledgeDeleteRelation,
-  apiAdminCompanyKnowledgeExtractRelations,
   apiAdminCompanyKnowledgeGraph,
+  apiAdminCompanyKnowledgeQueueGraphExtractionJobs,
   apiAdminCompanyKnowledgeUpdateRelation,
 } from '../api'
 
@@ -112,14 +110,14 @@ const graphRef = ref(null)
 const nodes = ref([])
 const edges = ref([])
 const loading = ref(false)
-const extracting = ref(false)
+const scanning = ref(false)
 const creating = ref(false)
 const selectedNodeId = ref(null)
-const extractSourceId = ref('')
-const extractResult = ref(null)
+const notice = ref(null)
 const newRel = ref({ sourceId: '', targetId: '', type: 'cite', direction: 'undirected', evidence: '' })
 
 let chart = null
+let noticeTimer = null
 
 const typeLabel = (t) => ({ policy: '制度', faq: '问答', history: '历史', news: '动态', department_knowledge: '部门知识' }[t] || t)
 const statusLabel = (s) => ({ draft: '待确认', confirmed: '已确认', rejected: '已拒绝' }[s] || s)
@@ -193,16 +191,16 @@ function renderGraph() {
 
 const nodeColor = (t) => ({ policy: '#4A90D9', faq: '#5FBE63', history: '#9B6FD8', news: '#E88D8D', department_knowledge: '#C99A2E' }[t] || '#9B9B9B')
 
-async function extractRelations() {
-  if (!extractSourceId.value) return
-  extracting.value = true
+async function queueGraphExtractionJobs() {
+  if (!confirm('将为全部已发布且生效的资料生成关系草稿。该操作会在后台调用模型，但不会自动确认任何关系。是否继续？')) return
+  scanning.value = true
   try {
-    const res = await apiAdminCompanyKnowledgeExtractRelations(extractSourceId.value)
-    if (!res.success) { showNotice(res.message || '抽取失败', 'error'); return }
-    extractResult.value = res.data || { created: 0, skipped: 0, unmatched: [] }
-    showNotice(`关系抽取完成：新增 ${extractResult.value.created} 条`)
-    await loadGraph()
-  } catch (error) { showNotice(error.message || '抽取失败', 'error') } finally { extracting.value = false }
+    const res = await apiAdminCompanyKnowledgeQueueGraphExtractionJobs()
+    if (!res.success) { showNotice(res.message || '提交失败', 'error'); return }
+    const queued = res.data?.queued || 0
+    const skipped = res.data?.skipped || 0
+    showNotice(queued ? `已提交 ${queued} 份资料的关系草稿任务${skipped ? `，${skipped} 份已有进行中任务` : ''}。` : '没有需要提交的资料，请稍后刷新查看任务状态。')
+  } catch (error) { showNotice(error.message || '提交失败', 'error') } finally { scanning.value = false }
 }
 
 async function createRelation() {
@@ -243,6 +241,12 @@ async function deleteRelation(edge) {
   } catch (error) { showNotice(error.message || '删除失败', 'error') }
 }
 
+function showNotice(text, type = 'info') {
+  notice.value = { text, type }
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => { notice.value = null }, 4500)
+}
+
 onMounted(async () => {
   await loadGraph()
   window.addEventListener('resize', handleResize)
@@ -250,6 +254,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  if (noticeTimer) clearTimeout(noticeTimer)
   if (chart) { chart.dispose(); chart = null }
 })
 
@@ -263,7 +268,7 @@ function handleResize() {
 .graph-toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
 .toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .page-title { font-size: 16px; font-weight: 600; }
-.source-select { padding: 6px 8px; border: 1px solid #ddd; border-radius: 6px; background: #fff; min-width: 240px; }
+.toolbar-tip { color: #8c7d65; font-size: 12px; }
 .btn-gold { background: #C99A2E; color: #fff; border: none; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
 .btn-gold:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-ghost { background: #fff; color: #555; border: 1px solid #ddd; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
@@ -271,6 +276,9 @@ function handleResize() {
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .legend-item i { width: 14px; height: 3px; display: inline-block; border-radius: 2px; }
 .legend-item.dash i { border-top: 2px dashed #999; height: 0; width: 14px; }
+.notice { margin: 0; padding: 8px 12px; border-radius: 7px; font-size: 13px; }
+.notice.info { background: #fff7e1; color: #8b651d; border: 1px solid #ead39a; }
+.notice.error { background: #fff0ed; color: #b95039; border: 1px solid #f0c2b6; }
 .graph-body { display: flex; gap: 12px; flex: 1; min-height: 0; }
 .graph-canvas { flex: 1; background: #fff; border-radius: 10px; border: 1px solid #eee; }
 .side-panel { width: 320px; background: #fff; border-radius: 10px; border: 1px solid #eee; padding: 14px; overflow-y: auto; }
@@ -296,7 +304,4 @@ function handleResize() {
 .add-form { display: flex; flex-direction: column; gap: 6px; }
 .add-form select, .add-form textarea { padding: 6px; border: 1px solid #ddd; border-radius: 6px; font-size: 12px; }
 .empty-tip { font-size: 12px; color: #999; }
-.extract-result { margin-top: 14px; border-top: 1px dashed #ddd; padding-top: 10px; font-size: 12px; }
-.unmatched-title { color: #E5533C; margin: 6px 0; }
-.unmatched-item { padding: 4px 0; border-bottom: 1px dashed #f0f0f0; }
 </style>
