@@ -33,6 +33,51 @@ class GraphServiceError(RuntimeError):
     pass
 
 
+def graph_extraction_job_to_dict(
+    job: CompanyKnowledgeJob,
+    *,
+    source_title: str | None = None,
+) -> dict:
+    """序列化图谱关系抽取任务，供管理端展示任务状态与结果摘要。"""
+    snapshot = job.request_snapshot if isinstance(job.request_snapshot, dict) else {}
+    result = snapshot.get("result") if isinstance(snapshot.get("result"), dict) else {}
+    return {
+        "id": str(job.id),
+        "source_id": str(job.source_id) if job.source_id else None,
+        "source_title": source_title or "已删除资料",
+        "status": job.status,
+        "trigger": snapshot.get("trigger") or "",
+        "result": {
+            "created": result.get("created", 0),
+            "skipped": result.get("skipped", 0),
+            "unmatched_count": result.get("unmatched_count", 0),
+        },
+        "error_message": job.error_message or "",
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
+
+async def list_graph_relation_extraction_jobs(
+    db: AsyncSession,
+    *,
+    limit: int = 12,
+) -> list[dict]:
+    """返回最近的图谱关系抽取任务，包含资料标题和生成结果摘要。"""
+    rows = await db.execute(
+        select(CompanyKnowledgeJob, CompanyKnowledgeSource.title)
+        .outerjoin(CompanyKnowledgeSource, CompanyKnowledgeSource.id == CompanyKnowledgeJob.source_id)
+        .where(CompanyKnowledgeJob.job_type == GRAPH_EXTRACTION_JOB_TYPE)
+        .order_by(CompanyKnowledgeJob.created_at.desc())
+        .limit(limit)
+    )
+    return [
+        graph_extraction_job_to_dict(job, source_title=source_title)
+        for job, source_title in rows.all()
+    ]
+
+
 async def enqueue_graph_relation_extraction(
     db: AsyncSession,
     *,
