@@ -9,11 +9,12 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.company_knowledge import (
+    CompanyKnowledgeJob,
     CompanyKnowledgeRelation,
     CompanyKnowledgeSource,
 )
@@ -24,10 +25,242 @@ RELATION_TYPE_LABELS = {"cite": "引用", "supersede": "替代", "parent": "上�
 RELATION_STATUSES = ("draft", "confirmed", "rejected")
 RELATION_ORIGINS = ("llm", "manual", "system")
 DIRECTIONS = ("directed", "undirected")
+GRAPH_EXTRACTION_JOB_TYPE = "graph_extract"
+ACTIVE_JOB_STATUSES = ("queued", "running")
 
 
 class GraphServiceError(RuntimeError):
     pass
+
+
+async def enqueue_graph_relation_extraction(
+    db: AsyncSession,
+    *,
+    source_id: str,
+    admin_id,
+    trigger: str,
+    force: bool = False,
+) -> tuple[CompanyKnowledgeJob, bool]:
+    """为一份已发布资料创建关系草稿抽取任务。
+
+    同一资料在已有排队或运行中的抽取任务时复用任务，避免发布重试或重复点击
+    造成并发模型调用。任务只会创建 draft 关系，仍须管理员确认才能参与检索。
+    """
+    try:
+        source_uuid = uuid.UUID(str(source_id))
+    except (TypeError, ValueError) as exc:
+        raise GraphServiceError("资料标识不合法") from exc
+
+    source = await db.get(CompanyKnowledgeSource, source_uuid)
+    if not source:
+        raise GraphServiceError("资料不存在")
+    if source.status != "published":
+        raise GraphServiceError("只有已发布资料可以生成关系草稿")
+
+    active_result = await db.execute(
+        select(CompanyKnowledgeJob)
+        .where(
+            CompanyKnowledgeJob.source_id == source.id,
+            CompanyKnowledgeJob.job_type == GRAPH_EXTRACTION_JOB_TYPE,
+            CompanyKnowledgeJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+        .order_by(CompanyKnowledgeJob.created_at.desc())
+        .limit(1)
+    )
+    active_job = active_result.scalar_one_or_none()
+    if active_job:
+        return active_job, False
+
+    if not force:
+        completed_result = await db.execute(
+            select(CompanyKnowledgeJob)
+            .where(
+                CompanyKnowledgeJob.source_id == source.id,
+                CompanyKnowledgeJob.job_type == GRAPH_EXTRACTION_JOB_TYPE,
+                CompanyKnowledgeJob.status == "succeeded",
+            )
+            .order_by(CompanyKnowledgeJob.finished_at.desc())
+            .limit(1)
+        )
+        completed_job = completed_result.scalar_one_or_none()
+        if (
+            completed_job
+            and completed_job.finished_at
+            and source.published_at
+            and completed_job.finished_at >= source.published_at
+        ):
+            return completed_job, False
+
+    job = CompanyKnowledgeJob(
+        source_id=source.id,
+        job_type=GRAPH_EXTRACTION_JOB_TYPE,
+        status="queued",
+        requested_by=admin_id,
+        total_chunks=1,
+        request_snapshot={"trigger": trigger},
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    return job, True
+
+
+async def enqueue_graph_relation_extractions_for_published_sources(
+    db: AsyncSession,
+    *,
+    admin_id,
+) -> tuple[list[CompanyKnowledgeJob], int]:
+    """为图谱口径内的存量资料批量创建关系草稿任务。
+
+    只扫描已发布、生效且允许全员访问的资料，与图谱节点和关系候选的口径一致。
+    """
+    now = datetime.now(timezone.utc)
+    sources_result = await db.execute(
+        select(CompanyKnowledgeSource).where(
+            CompanyKnowledgeSource.status == "published",
+            CompanyKnowledgeSource.access_scope == "all_users",
+            CompanyKnowledgeSource.effective_at <= now,
+            or_(
+                CompanyKnowledgeSource.expires_at.is_(None),
+                CompanyKnowledgeSource.expires_at > now,
+            ),
+        )
+    )
+    sources = list(sources_result.scalars().all())
+    if not sources:
+        return [], 0
+
+    source_ids = [source.id for source in sources]
+    active_result = await db.execute(
+        select(CompanyKnowledgeJob).where(
+            CompanyKnowledgeJob.source_id.in_(source_ids),
+            CompanyKnowledgeJob.job_type == GRAPH_EXTRACTION_JOB_TYPE,
+            CompanyKnowledgeJob.status.in_(ACTIVE_JOB_STATUSES),
+        )
+    )
+    active_jobs = list(active_result.scalars().all())
+    active_source_ids = {job.source_id for job in active_jobs}
+    queued_jobs = [job for job in active_jobs if job.status == "queued"]
+    completed_result = await db.execute(
+        select(CompanyKnowledgeJob.source_id, func.max(CompanyKnowledgeJob.finished_at))
+        .where(
+            CompanyKnowledgeJob.source_id.in_(source_ids),
+            CompanyKnowledgeJob.job_type == GRAPH_EXTRACTION_JOB_TYPE,
+            CompanyKnowledgeJob.status == "succeeded",
+        )
+        .group_by(CompanyKnowledgeJob.source_id)
+    )
+    completed_at_by_source = {row[0]: row[1] for row in completed_result.all()}
+    already_scanned_source_ids = {
+        source.id
+        for source in sources
+        if completed_at_by_source.get(source.id)
+        and source.published_at
+        and completed_at_by_source[source.id] >= source.published_at
+    }
+    running_source_ids = {job.source_id for job in active_jobs if job.status == "running"}
+    skipped_source_ids = running_source_ids | already_scanned_source_ids
+    queued_sources = [
+        source
+        for source in sources
+        if source.id not in (active_source_ids | already_scanned_source_ids)
+    ]
+    if not queued_sources:
+        return queued_jobs, len(skipped_source_ids)
+
+    jobs = [
+        CompanyKnowledgeJob(
+            source_id=source.id,
+            job_type=GRAPH_EXTRACTION_JOB_TYPE,
+            status="queued",
+            requested_by=admin_id,
+            total_chunks=1,
+            request_snapshot={"trigger": "batch_backfill"},
+        )
+        for source in queued_sources
+    ]
+    db.add_all(jobs)
+    await db.commit()
+    for job in jobs:
+        await db.refresh(job)
+    return [*queued_jobs, *jobs], len(skipped_source_ids)
+
+
+async def execute_graph_relation_extraction_job(
+    db: AsyncSession,
+    *,
+    job_id: str,
+) -> CompanyKnowledgeJob | None:
+    """在独立数据库会话内运行一个已入队的关系草稿抽取任务。"""
+    try:
+        job_uuid = uuid.UUID(str(job_id))
+    except (TypeError, ValueError):
+        return None
+
+    job = await db.get(CompanyKnowledgeJob, job_uuid)
+    if not job or job.job_type != GRAPH_EXTRACTION_JOB_TYPE:
+        return None
+    if job.status != "queued":
+        return job
+
+    source = await db.get(CompanyKnowledgeSource, job.source_id)
+    if not source or source.status != "published":
+        job.status = "cancelled"
+        job.error_message = "资料已下架或删除，未执行关系草稿抽取"
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        return job
+
+    started_at = datetime.now(timezone.utc)
+    claim_result = await db.execute(
+        update(CompanyKnowledgeJob)
+        .where(
+            CompanyKnowledgeJob.id == job_uuid,
+            CompanyKnowledgeJob.status == "queued",
+        )
+        .values(status="running", started_at=started_at, error_message="")
+        .returning(CompanyKnowledgeJob.id)
+    )
+    if not claim_result.scalar_one_or_none():
+        await db.rollback()
+        return await db.get(CompanyKnowledgeJob, job_uuid)
+
+    job.status = "running"
+    job.started_at = started_at
+    job.error_message = ""
+    await db.commit()
+
+    try:
+        result = await extract_source_relations(
+            db,
+            source_id=str(source.id),
+            admin_id=job.requested_by,
+        )
+        snapshot = dict(job.request_snapshot or {})
+        snapshot["result"] = {
+            "created": result["created"],
+            "skipped": result["skipped"],
+            "unmatched_count": len(result["unmatched"]),
+        }
+        job.request_snapshot = snapshot
+        job.status = "succeeded"
+        job.succeeded_chunks = 1
+        job.failed_chunks = 0
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(job)
+        return job
+    except Exception as exc:
+        await db.rollback()
+        failed_job = await db.get(CompanyKnowledgeJob, job_uuid)
+        if not failed_job:
+            return None
+        failed_job.status = "failed"
+        failed_job.failed_chunks = 1
+        failed_job.error_message = str(exc)[:2000]
+        failed_job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        return failed_job
 
 
 def relation_to_dict(relation: CompanyKnowledgeRelation) -> dict:

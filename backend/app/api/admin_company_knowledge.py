@@ -14,7 +14,9 @@ from app.plugins.company_knowledge.graph_service import (
     build_graph,
     create_relation,
     delete_relation,
-    extract_source_relations,
+    enqueue_graph_relation_extraction,
+    enqueue_graph_relation_extractions_for_published_sources,
+    execute_graph_relation_extraction_job,
     list_relations,
     relation_to_dict,
     update_relation_status,
@@ -66,6 +68,18 @@ async def _execute_validation_run_in_background(run_id: str) -> None:
     """使用独立会话运行耗时的模型与向量验证，避免占用管理端 HTTP 请求。"""
     async with async_session_factory() as task_db:
         await execute_company_knowledge_validation_run(task_db, run_id=run_id)
+
+
+async def _execute_graph_relation_extraction_in_background(job_id: str) -> None:
+    """使用独立会话执行 LLM 关系草稿抽取，避免阻塞管理端请求。"""
+    async with async_session_factory() as task_db:
+        await execute_graph_relation_extraction_job(task_db, job_id=job_id)
+
+
+async def _execute_graph_relation_extractions_in_background(job_ids: list[str]) -> None:
+    """批量补齐时按顺序执行，避免一次并发调用大量模型请求。"""
+    for job_id in job_ids:
+        await _execute_graph_relation_extraction_in_background(job_id)
 
 
 class ChunkInput(BaseModel):
@@ -462,14 +476,29 @@ async def confirm_source_chunk_set_validation_run(
 @router.post("/sources/{source_id}/publish")
 async def publish_source(
     source_id: str,
+    background_tasks: BackgroundTasks,
     admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
         source = await publish_company_source(db, source_id, admin.id)
+        graph_job, created = await enqueue_graph_relation_extraction(
+            db,
+            source_id=str(source.id),
+            admin_id=admin.id,
+            trigger="publish",
+        )
     except CompanyKnowledgeServiceError as exc:
         return fail(str(exc))
-    return ok({"source": source_to_dict(source)}, "制度已发布")
+    except GraphServiceError as exc:
+        return fail(f"资料已发布，但关系草稿任务创建失败：{exc}")
+    if created or graph_job.status == "queued":
+        background_tasks.add_task(_execute_graph_relation_extraction_in_background, str(graph_job.id))
+    message = "制度已发布，正在后台生成关系草稿" if created else "制度已发布，关系草稿任务已在处理中"
+    return ok(
+        {"source": source_to_dict(source), "graph_extraction_job": job_to_dict(graph_job)},
+        message,
+    )
 
 
 @router.post("/sources/{source_id}/archive")
@@ -641,16 +670,53 @@ async def company_knowledge_update_relation_status(
 @router.post("/sources/{source_id}/relations/extract")
 async def company_knowledge_extract_relations(
     source_id: str,
+    background_tasks: BackgroundTasks,
     admin: Admin = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        result = await extract_source_relations(
-            db, source_id=source_id, admin_id=admin.id
+        job, created = await enqueue_graph_relation_extraction(
+            db,
+            source_id=source_id,
+            admin_id=admin.id,
+            trigger="manual",
+            force=True,
         )
     except GraphServiceError as exc:
         return fail(str(exc))
-    return ok(result, "关系抽取完成，结果已进入待确认状态")
+    if created or job.status == "queued":
+        background_tasks.add_task(_execute_graph_relation_extraction_in_background, str(job.id))
+    message = "关系草稿任务已提交，完成后请刷新图谱" if created else "该资料的关系草稿任务正在处理中"
+    return ok({"job": job_to_dict(job), "queued": created}, message)
+
+
+@router.post("/graph/extraction-jobs")
+async def queue_graph_relation_extractions(
+    background_tasks: BackgroundTasks,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """为存量已发布资料批量补齐关系草稿；不自动确认任何关系。"""
+    try:
+        jobs, skipped = await enqueue_graph_relation_extractions_for_published_sources(
+            db,
+            admin_id=admin.id,
+        )
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    if jobs:
+        background_tasks.add_task(
+            _execute_graph_relation_extractions_in_background,
+            [str(job.id) for job in jobs],
+        )
+    return ok(
+        {
+            "queued": len(jobs),
+            "skipped": skipped,
+            "jobs": [job_to_dict(job) for job in jobs],
+        },
+        "已提交存量资料关系草稿任务" if jobs else "没有需要提交的资料，现有任务仍在处理中",
+    )
 
 
 @router.delete("/relations/{relation_id}")

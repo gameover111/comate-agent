@@ -68,6 +68,8 @@ export const apiAdminCompanyKnowledgeUpdateRelation = (relationId, status) =>
   request(`/company-knowledge/relations/${relationId}`, { method: 'PUT', body: JSON.stringify({ status }) })
 export const apiAdminCompanyKnowledgeDeleteRelation = (relationId) =>
   request(`/company-knowledge/relations/${relationId}`, { method: 'DELETE', body: '{}' })
+export const apiAdminCompanyKnowledgeQueueGraphExtractionJobs = () =>
+  request('/company-knowledge/graph/extraction-jobs', { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeExtractRelations = (sourceId) =>
   request(`/company-knowledge/sources/${sourceId}/relations/extract`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeCreateValidationRun = (sourceId, chunkSetId, data) =>
