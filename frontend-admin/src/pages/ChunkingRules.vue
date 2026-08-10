@@ -83,7 +83,10 @@
         </div>
         <div v-if="mode !== 'manual'" class="rule-fields">
           <label>目标长度<input v-model.number="rule.max_chars" type="number" min="120" max="3000" /> <span>字符</span></label>
-          <label>重叠长度<input v-model.number="rule.overlap_chars" type="number" min="0" :max="Math.max(0, rule.max_chars - 1)" /> <span>字符</span></label>
+          <label class="semantic-switch"><input v-model="rule.semantic.enabled" type="checkbox" /> <span>语义切分（Embedding 突变检测）</span></label>
+          <label v-if="rule.semantic.enabled">语义阈值<input v-model.number="rule.semantic.min_similarity" type="number" min="0.1" max="1" step="0.05" /> <span>相邻段落相似度低于该值即断开（默认 0.75）</span></label>
+          <label v-else>重叠长度<input v-model.number="rule.overlap_chars" type="number" min="0" :max="Math.max(0, rule.max_chars - 1)" /> <span>字符</span></label>
+          <label v-if="mode === 'auto_then_manual'" class="semantic-switch"><input v-model="rule.llm_refine.enabled" type="checkbox" /> <span>LLM 语义裁决（自动生成后由大模型建议合并/拆分）</span></label>
         </div>
         <button class="btn-gold" :disabled="creating" @click="createDraft">{{ creating ? '正在生成…' : '生成分片草稿' }}</button>
       </section>
@@ -99,7 +102,10 @@
             <button class="btn-ghost" :disabled="saving" @click="saveDraft">{{ saving ? '保存中…' : '保存草稿' }}</button>
             <button class="btn-gold" :disabled="saving" @click="confirmDraft">确认分片</button>
           </div>
-          <button v-else-if="selectedSetDisplayStatus === 'confirmed' && detail.source.status !== 'archived'" class="btn-gold" :disabled="indexing" @click="indexDraft">{{ indexing ? '向量化中…' : '向量化' }}</button>
+          <div v-else-if="selectedSetDisplayStatus === 'confirmed' && detail.source.status !== 'archived'" class="workflow-action">
+            <button class="btn-ghost" :disabled="contextualizing" @click="contextualizeDraft">{{ contextualizing ? '生成中…' : '生成上下文描述' }}</button>
+            <button class="btn-gold" :disabled="indexing" @click="indexDraft">{{ indexing ? '向量化中…' : '向量化' }}</button>
+          </div>
           <div v-else-if="selectedSetDisplayStatus === 'indexed'" class="workflow-action">
             <span class="indexed-note">已向量化</span>
             <button class="btn-gold" @click="openValidation">问答验证</button>
@@ -259,6 +265,7 @@ import {
   apiAdminCompanyKnowledgeCreateChunkSet,
   apiAdminCompanyKnowledgeDelete,
   apiAdminCompanyKnowledgeDeleteJob,
+  apiAdminCompanyKnowledgeContextualizeChunkSet,
   apiAdminCompanyKnowledgeIndexChunkSet,
   apiAdminCompanyKnowledgeJobs,
   apiAdminCompanyKnowledgePreprocess,
@@ -281,10 +288,11 @@ const detail = ref(null)
 const activeChunkSetId = ref('')
 const draftChunks = ref([])
 const mode = ref('auto_then_manual')
-const rule = ref({ max_chars: 500, overlap_chars: 100 })
+const rule = ref({ max_chars: 500, overlap_chars: 100, semantic: { enabled: false, min_similarity: 0.75 }, llm_refine: { enabled: false } })
 const creating = ref(false)
 const saving = ref(false)
 const indexing = ref(false)
+const contextualizing = ref(false)
 const runningValidation = ref(false)
 const confirmingValidation = ref(false)
 const sourceActing = ref(false)
@@ -657,6 +665,17 @@ async function confirmDraft() {
   if (res.success) { await Promise.all([loadDetail(), loadSources()]); showNotice('分片已确认，可以向量化。') }
   else showNotice(res.message || '确认失败', 'error')
 }
+async function contextualizeDraft() {
+  if (!selectedSet.value || !confirm('调用大模型为每个分片生成上下文描述（存 metadata，不改动正文与向量）？')) return
+  contextualizing.value = true
+  try {
+    const res = await apiAdminCompanyKnowledgeContextualizeChunkSet(sourceId.value, selectedSet.value.id)
+    if (!res.success) { showNotice(res.message || '生成失败', 'error'); return }
+    await Promise.all([loadDetail(), loadSources(), loadJobs()])
+    showNotice('上下文描述已生成，可以继续向量化。')
+  } catch (error) { showNotice(error.message || '生成失败', 'error') } finally { contextualizing.value = false }
+}
+
 async function indexDraft() {
   if (!selectedSet.value || !confirm('开始调用 Embedding 模型向量化这些已确认分片？')) return
   indexing.value = true

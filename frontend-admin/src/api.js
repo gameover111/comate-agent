@@ -49,6 +49,8 @@ export const apiAdminCompanyKnowledgeUpdateChunkSet = (sourceId, chunkSetId, chu
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}`, { method: 'PUT', body: JSON.stringify({ chunks }) })
 export const apiAdminCompanyKnowledgeConfirmChunkSet = (sourceId, chunkSetId) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/confirm`, { method: 'POST', body: '{}' })
+export const apiAdminCompanyKnowledgeContextualizeChunkSet = (sourceId, chunkSetId) =>
+  request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/contextualize`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeIndexChunkSet = (sourceId, chunkSetId) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/index`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgePreviewChunkSet = (sourceId, chunkSetId, data) =>
@@ -57,6 +59,17 @@ export const apiAdminCompanyKnowledgeValidateChunkSet = (sourceId, chunkSetId, d
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/validate`, { method: 'POST', body: JSON.stringify(data) })
 export const apiAdminCompanyKnowledgeValidationRuns = (sourceId, chunkSetId) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/validation-runs?refresh=${Date.now()}`, { cache: 'no-store' })
+export const apiAdminCompanyKnowledgeGraph = () => request(`/company-knowledge/graph`)
+export const apiAdminCompanyKnowledgeRelations = (sourceId = '', status = '') =>
+  request(`/company-knowledge/relations?source_id=${encodeURIComponent(sourceId)}&status=${encodeURIComponent(status)}`)
+export const apiAdminCompanyKnowledgeCreateRelation = (data) =>
+  request('/company-knowledge/relations', { method: 'POST', body: JSON.stringify(data) })
+export const apiAdminCompanyKnowledgeUpdateRelation = (relationId, status) =>
+  request(`/company-knowledge/relations/${relationId}`, { method: 'PUT', body: JSON.stringify({ status }) })
+export const apiAdminCompanyKnowledgeDeleteRelation = (relationId) =>
+  request(`/company-knowledge/relations/${relationId}`, { method: 'DELETE', body: '{}' })
+export const apiAdminCompanyKnowledgeExtractRelations = (sourceId) =>
+  request(`/company-knowledge/sources/${sourceId}/relations/extract`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeCreateValidationRun = (sourceId, chunkSetId, data) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/validation-runs`, { method: 'POST', body: JSON.stringify(data) })
 export const apiAdminCompanyKnowledgeConfirmValidationRun = (sourceId, chunkSetId, runId) =>

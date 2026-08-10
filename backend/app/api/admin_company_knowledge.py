@@ -9,6 +9,16 @@ from app.api.admin_auth import get_current_admin
 from app.api.response import fail, ok
 from app.db.session import async_session_factory, get_db
 from app.models.billing import Admin
+from app.plugins.company_knowledge.graph_service import (
+    GraphServiceError,
+    build_graph,
+    create_relation,
+    delete_relation,
+    extract_source_relations,
+    list_relations,
+    relation_to_dict,
+    update_relation_status,
+)
 from app.plugins.company_knowledge.importer import SourceImportError
 from app.plugins.company_knowledge.retriever import (
     MIN_SIMILARITY,
@@ -24,6 +34,7 @@ from app.plugins.company_knowledge.service import (
     confirm_company_knowledge_validation_run,
     confirm_chunk_set,
     confirm_preprocess_company_source,
+    contextualize_chunk_set,
     create_company_knowledge_validation_run,
     create_chunk_set,
     delete_archived_company_source,
@@ -301,6 +312,22 @@ async def confirm_source_chunk_set(
     return ok({"chunk_set": chunk_set_to_dict(chunk_set)}, "分片已确认，可以向量化")
 
 
+@router.post("/sources/{source_id}/chunk-sets/{chunk_set_id}/contextualize")
+async def contextualize_source_chunk_set(
+    source_id: str,
+    chunk_set_id: str,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        chunk_set = await contextualize_chunk_set(
+            db, source_id=source_id, chunk_set_id=chunk_set_id, admin_id=admin.id
+        )
+    except CompanyKnowledgeServiceError as exc:
+        return fail(str(exc))
+    return ok({"chunk_set": chunk_set_to_dict(chunk_set)}, "上下文描述已生成")
+
+
 @router.post("/sources/{source_id}/chunk-sets/{chunk_set_id}/index")
 async def index_source_chunk_set(
     source_id: str,
@@ -532,3 +559,108 @@ async def delete_job(
     except CompanyKnowledgeServiceError as exc:
         return fail(str(exc))
     return ok({}, "处理任务记录已删除")
+
+
+class CreateRelationRequest(BaseModel):
+    source_id: str
+    target_source_id: str
+    relation_type: str
+    direction: str = "undirected"
+    evidence: str = ""
+    origin: str = "manual"
+
+
+class UpdateRelationStatusRequest(BaseModel):
+    status: str
+
+
+@router.get("/graph")
+async def company_knowledge_graph(
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        graph = await build_graph(db)
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok(graph, "图谱数据已加载")
+
+
+@router.get("/relations")
+async def company_knowledge_relations(
+    source_id: str | None = None,
+    status: str | None = None,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        relations = await list_relations(db, source_id=source_id, status=status)
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok({"relations": [relation_to_dict(rel) for rel in relations]}, "关系列表已加载")
+
+
+@router.post("/relations")
+async def company_knowledge_create_relation(
+    req: CreateRelationRequest,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        relation = await create_relation(
+            db,
+            source_id=req.source_id,
+            target_source_id=req.target_source_id,
+            relation_type=req.relation_type,
+            direction=req.direction,
+            evidence=req.evidence,
+            origin=req.origin,
+            admin_id=admin.id,
+        )
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok({"relation": relation_to_dict(relation)}, "关系已创建（待确认）")
+
+
+@router.put("/relations/{relation_id}")
+async def company_knowledge_update_relation_status(
+    relation_id: str,
+    req: UpdateRelationStatusRequest,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        relation = await update_relation_status(
+            db, relation_id=relation_id, status=req.status, admin_id=admin.id
+        )
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok({"relation": relation_to_dict(relation)}, "关系状态已更新")
+
+
+@router.post("/sources/{source_id}/relations/extract")
+async def company_knowledge_extract_relations(
+    source_id: str,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        result = await extract_source_relations(
+            db, source_id=source_id, admin_id=admin.id
+        )
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok(result, "关系抽取完成，结果已进入待确认状态")
+
+
+@router.delete("/relations/{relation_id}")
+async def company_knowledge_delete_relation(
+    relation_id: str,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await delete_relation(db, relation_id=relation_id)
+    except GraphServiceError as exc:
+        return fail(str(exc))
+    return ok({}, "关系已删除")

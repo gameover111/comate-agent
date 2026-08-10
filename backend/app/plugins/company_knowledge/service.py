@@ -18,7 +18,11 @@ from app.models.company_knowledge import (
     CompanyKnowledgeValidationRun,
 )
 from app.models.conversation import Message, Session
-from app.plugins.company_knowledge.chunker import chunk_text
+from app.plugins.company_knowledge.chunker import TextChunk, chunk_text, chunk_text_semantic
+from app.plugins.company_knowledge.llm_chunker import (
+    generate_contextual_descriptions,
+    llm_refine_chunks,
+)
 from app.plugins.company_knowledge.importer import SourceImportError, content_hash, read_text_source, to_markdown
 from app.plugins.company_knowledge.memory_boundary import COMPANY_KNOWLEDGE_MESSAGE_TYPE
 from app.plugins.company_knowledge.answer_service import generate_company_knowledge_answer
@@ -546,7 +550,15 @@ async def save_company_knowledge_answer(
     answer: str,
     knowledge_type: str,
     citations: list[dict],
+    related_sources: list[dict] | None = None,
 ) -> Message:
+    company_knowledge_meta: dict = {
+        "knowledge_type": knowledge_type,
+        "citations": citations,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if related_sources:
+        company_knowledge_meta["related_sources"] = related_sources
     item = Message(
         session_id=session.id,
         role="agent",
@@ -555,11 +567,7 @@ async def save_company_knowledge_answer(
         metadata_=json.dumps(
             {
                 "ui_channel": "rag_floating_chat",
-                "company_knowledge": {
-                    "knowledge_type": knowledge_type,
-                    "citations": citations,
-                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                }
+                "company_knowledge": company_knowledge_meta,
             },
             ensure_ascii=False,
         ),
@@ -594,12 +602,30 @@ async def create_chunk_set(
     rule_snapshot = _normalize_chunk_rule(rule)
     chunk_source = source.preprocessed_content or source.markdown_content or source.raw_content
     if mode in {"auto", "auto_then_manual"}:
-        generated = chunk_text(
-            chunk_source,
-            source_format="md",
-            max_chars=rule_snapshot["max_chars"],
-            overlap_chars=rule_snapshot["overlap_chars"],
-        )
+        semantic = rule_snapshot.get("semantic")
+        if semantic and semantic.get("enabled"):
+            generated = await chunk_text_semantic(
+                chunk_source,
+                source_format="md",
+                max_chars=rule_snapshot["max_chars"],
+                min_similarity=semantic["min_similarity"],
+            )
+        else:
+            generated = chunk_text(
+                chunk_source,
+                source_format="md",
+                max_chars=rule_snapshot["max_chars"],
+                overlap_chars=rule_snapshot["overlap_chars"],
+            )
+        refine_warnings: list[str] = []
+        if mode == "auto_then_manual" and rule_snapshot.get("llm_refine", {}).get("enabled"):
+            generated, refine_warnings = await llm_refine_chunks(
+                generated,
+                source_title=source.title,
+                target_len=rule_snapshot["max_chars"],
+            )
+        if refine_warnings:
+            rule_snapshot = {**rule_snapshot, "refine_warnings": refine_warnings}
         chunk_items = [
             {"section_path": item.section_path, "content": item.content, "token_count": item.token_count}
             for item in generated
@@ -757,6 +783,84 @@ async def index_chunk_set(
             failed_job.finished_at = datetime.now(timezone.utc)
         await db.commit()
         raise CompanyKnowledgeServiceError("向量化失败") from exc
+
+
+async def contextualize_chunk_set(
+    db: AsyncSession,
+    *,
+    source_id: str,
+    chunk_set_id: str,
+    admin_id,
+) -> CompanyKnowledgeChunkSet:
+    """A3 Contextual Retrieval：为已确认分片的每个块生成上下文描述并写入 metadata。
+
+    描述仅存 `chunk.metadata_.contextual_description`，不改动正文与向量；
+    单块生成失败自动跳过，不阻塞整体。
+    """
+    source = await _get_source(db, source_id)
+    chunk_set = await _get_chunk_set(db, source.id, chunk_set_id)
+    if chunk_set.status != "confirmed":
+        raise CompanyKnowledgeServiceError("请先确认分片后再生成上下文描述")
+    rows = await db.execute(
+        select(CompanyKnowledgeChunk)
+        .where(CompanyKnowledgeChunk.chunk_set_id == chunk_set.id)
+        .order_by(CompanyKnowledgeChunk.chunk_index.asc())
+    )
+    chunks = rows.scalars().all()
+    if not chunks:
+        raise CompanyKnowledgeServiceError("该分片版本没有有效内容")
+
+    job = CompanyKnowledgeJob(
+        source_id=source.id,
+        chunk_set_id=chunk_set.id,
+        job_type="contextualize",
+        status="running",
+        requested_by=admin_id,
+        total_chunks=len(chunks),
+        started_at=datetime.now(timezone.utc),
+    )
+    db.add(job)
+    await db.commit()
+
+    try:
+        text_chunks = [
+            TextChunk(
+                chunk_index=index,
+                section_path=chunk.section_path,
+                content=chunk.content,
+                token_count=chunk.token_count,
+            )
+            for index, chunk in enumerate(chunks)
+        ]
+        descriptions = await generate_contextual_descriptions(
+            text_chunks,
+            source_title=source.title,
+        )
+        updated = 0
+        for chunk, description in zip(chunks, descriptions, strict=True):
+            if not description:
+                continue
+            meta = dict(chunk.metadata_ or {})
+            meta["contextual_description"] = description
+            chunk.metadata_ = meta
+            updated += 1
+        job.status = "succeeded"
+        job.succeeded_chunks = updated
+        job.failed_chunks = len(chunks) - updated
+        job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(chunk_set)
+        return chunk_set
+    except Exception as exc:
+        await db.rollback()
+        chunk_set = await _get_chunk_set(db, source.id, chunk_set_id)
+        failed_job = await db.get(CompanyKnowledgeJob, job.id)
+        if failed_job:
+            failed_job.status = "failed"
+            failed_job.error_message = str(exc)[:2000]
+            failed_job.finished_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise CompanyKnowledgeServiceError("上下文描述生成失败") from exc
 
 
 async def validate_chunk_set(
@@ -1284,7 +1388,21 @@ def _normalize_chunk_rule(rule: dict | None) -> dict:
     overlap_chars = int(incoming.get("overlap_chars", 100))
     if max_chars < 120 or overlap_chars < 0 or overlap_chars >= max_chars:
         raise CompanyKnowledgeServiceError("切分长度或重叠长度不合法")
-    return {"max_chars": max_chars, "overlap_chars": overlap_chars}
+    normalized = {"max_chars": max_chars, "overlap_chars": overlap_chars}
+    semantic = incoming.get("semantic")
+    if semantic:
+        if not isinstance(semantic, dict):
+            raise CompanyKnowledgeServiceError("semantic 参数不合法")
+        min_similarity = float(semantic.get("min_similarity", 0.75))
+        if not 0 < min_similarity <= 1:
+            raise CompanyKnowledgeServiceError("语义阈值需在 (0, 1] 区间")
+        normalized["semantic"] = {"enabled": True, "min_similarity": min_similarity}
+    llm_refine = incoming.get("llm_refine")
+    if llm_refine:
+        if not isinstance(llm_refine, dict):
+            raise CompanyKnowledgeServiceError("llm_refine 参数不合法")
+        normalized["llm_refine"] = {"enabled": bool(llm_refine.get("enabled", True))}
+    return normalized
 
 
 def _normalize_chunk_items(chunks: list[dict]) -> list[dict]:

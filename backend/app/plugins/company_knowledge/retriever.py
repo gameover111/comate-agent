@@ -34,6 +34,7 @@ class RetrievedChunk:
     content: str
     similarity: float
     chunk_set_id: str | None = None
+    contextual_description: str | None = None
 
     def to_citation(self) -> dict:
         return {
@@ -164,7 +165,8 @@ async def _load_published_candidates(
                 source.version,
                 source.effective_at,
                 chunk.section_path,
-                chunk.content
+                chunk.content,
+                chunk.metadata
             FROM company_knowledge_chunks AS chunk
             JOIN company_knowledge_sources AS source ON source.id = chunk.source_id
             JOIN company_knowledge_chunk_sets AS chunk_set ON chunk_set.id = chunk.chunk_set_id
@@ -195,7 +197,8 @@ async def _load_chunk_set_candidates(
                 source.version,
                 source.effective_at,
                 chunk.section_path,
-                chunk.content
+                chunk.content,
+                chunk.metadata
             FROM company_knowledge_chunks AS chunk
             JOIN company_knowledge_sources AS source ON source.id = chunk.source_id
             JOIN company_knowledge_chunk_sets AS chunk_set ON chunk_set.id = chunk.chunk_set_id
@@ -212,6 +215,7 @@ async def _load_chunk_set_candidates(
 
 def _candidate_from_row(row) -> dict:
     effective_at = row["effective_at"]
+    metadata = row["metadata"] or {}
     return {
         "chunk_id": str(row["chunk_id"]),
         "chunk_set_id": str(row["chunk_set_id"]),
@@ -221,6 +225,7 @@ def _candidate_from_row(row) -> dict:
         "effective_at": effective_at.date().isoformat() if effective_at else None,
         "section_path": row["section_path"] or "",
         "content": row["content"],
+        "contextual_description": metadata.get("contextual_description"),
     }
 
 
@@ -286,4 +291,5 @@ def _to_retrieved_chunk(candidate: dict, similarity: float) -> RetrievedChunk:
         section_path=candidate["section_path"],
         content=candidate["content"],
         similarity=similarity,
+        contextual_description=candidate.get("contextual_description"),
     )
