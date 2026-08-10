@@ -550,7 +550,15 @@ async def save_company_knowledge_answer(
     answer: str,
     knowledge_type: str,
     citations: list[dict],
+    related_sources: list[dict] | None = None,
 ) -> Message:
+    company_knowledge_meta: dict = {
+        "knowledge_type": knowledge_type,
+        "citations": citations,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if related_sources:
+        company_knowledge_meta["related_sources"] = related_sources
     item = Message(
         session_id=session.id,
         role="agent",
@@ -559,11 +567,7 @@ async def save_company_knowledge_answer(
         metadata_=json.dumps(
             {
                 "ui_channel": "rag_floating_chat",
-                "company_knowledge": {
-                    "knowledge_type": knowledge_type,
-                    "citations": citations,
-                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                }
+                "company_knowledge": company_knowledge_meta,
             },
             ensure_ascii=False,
         ),
