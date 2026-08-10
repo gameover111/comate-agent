@@ -126,3 +126,29 @@ def build_contextualize_prompt(
 下一分片开头：{next_head or '（无）'}
 
 请为本分片生成 1~2 句上下文描述。"""
+
+
+GRAPH_EXTRACT_SYSTEM_PROMPT = """你是公司知识库的文档关系抽取助手。
+从给定制度资料中抽取它与另一份制度文档之间的显式关系。
+关系类型（只允许这四种）：
+- cite 引用：本文档明确引用了另一份制度/文档（如"按《考勤制度》执行"）。
+- supersede 替代：本文档替代了另一份文档（如"自本制度发布之日起，原《XX规定》废止"）。
+- parent 上下位：本文档与另一份文档存在总则/细则的上下级关系。
+- related 关联：本文档与另一份文档主题紧密关联（如同一流程的上下游）。
+规则：
+- 只抽取原文显式表达的关系，必须附证据原文片段；不推测、不编造。
+- 目标文档尽量使用其完整标题。
+仅返回 JSON 数组，格式为 [{"relation_type": "cite", "target_title": "目标文档完整标题", "evidence": "原文证据片段"}]，不要输出 Markdown 或其他文字。"""
+
+
+def build_graph_extract_prompt(source_title: str, content: str, known_titles: list[str]) -> str:
+    """构造关系抽取输入：当前资料（截断）+ 可指向的目标文档标题列表。"""
+    titles = "\n".join(f"- {title}" for title in known_titles)
+    return f"""当前资料标题：{source_title}
+当前资料正文：
+{content[:6000]}
+
+已有制度文档标题列表（目标文档只能从列表中选择）：
+{titles}
+
+请抽取当前资料与列表中文档的关系。"""

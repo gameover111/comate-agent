@@ -144,6 +144,53 @@ class CompanyKnowledgeJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class CompanyKnowledgeRelation(Base):
+    """文档级关系图谱的边：引用/替代/上下位/关联。
+
+    status: draft(待确认) / confirmed(已确认，参与检索) / rejected(已拒绝)。
+    origin: llm(大模型抽取) / manual(人工维护) / system(系统规则，如版本替代)。
+    """
+
+    __tablename__ = "company_knowledge_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "target_source_id",
+            "relation_type",
+            name="uq_company_knowledge_relation_pair",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("company_knowledge_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("company_knowledge_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    relation_type: Mapped[str] = mapped_column(String(16), nullable=False)  # cite / supersede / parent / related
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="undirected")
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft", index=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admins.id"), nullable=False
+    )
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admins.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class CompanyKnowledgeValidationRun(Base):
     """一次可复核的发布前问答验证运行。"""
 
