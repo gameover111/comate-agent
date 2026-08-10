@@ -102,8 +102,10 @@
             <button class="btn-ghost" :disabled="saving" @click="saveDraft">{{ saving ? '保存中…' : '保存草稿' }}</button>
             <button class="btn-gold" :disabled="saving" @click="confirmDraft">确认分片</button>
           </div>
-          <button v-else-if="selectedSetDisplayStatus === 'confirmed' && detail.source.status !== 'archived'" class="btn-ghost" :disabled="contextualizing" @click="contextualizeDraft">{{ contextualizing ? '生成中…' : '生成上下文描述' }}</button>
-          <button v-else-if="selectedSetDisplayStatus === 'confirmed' && detail.source.status !== 'archived'" class="btn-gold" :disabled="indexing" @click="indexDraft">{{ indexing ? '向量化中…' : '向量化' }}</button>
+          <div v-else-if="selectedSetDisplayStatus === 'confirmed' && detail.source.status !== 'archived'" class="workflow-action">
+            <button class="btn-ghost" :disabled="contextualizing" @click="contextualizeDraft">{{ contextualizing ? '生成中…' : '生成上下文描述' }}</button>
+            <button class="btn-gold" :disabled="indexing" @click="indexDraft">{{ indexing ? '向量化中…' : '向量化' }}</button>
+          </div>
           <div v-else-if="selectedSetDisplayStatus === 'indexed'" class="workflow-action">
             <span class="indexed-note">已向量化</span>
             <button class="btn-gold" @click="openValidation">问答验证</button>
