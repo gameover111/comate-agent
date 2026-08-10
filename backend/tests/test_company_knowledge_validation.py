@@ -414,6 +414,7 @@ class CompanyKnowledgeRetrieverTests(unittest.IsolatedAsyncioTestCase):
             "effective_at": datetime(2026, 8, 4, tzinfo=timezone.utc),
             "section_path": "公司文化",
             "content": "公司名称为伴行。",
+            "metadata": {},
             "similarity": 0.345,
         }
         result = SimpleNamespace(mappings=lambda: SimpleNamespace(all=lambda: [row]))
@@ -441,6 +442,7 @@ class CompanyKnowledgeRetrieverTests(unittest.IsolatedAsyncioTestCase):
             "effective_at": datetime(2026, 8, 4, tzinfo=timezone.utc),
             "section_path": "年假",
             "content": "员工年假应至少提前五个工作日申请。",
+            "metadata": {},
         }
         other = {
             "chunk_id": "chunk-2",
@@ -451,6 +453,7 @@ class CompanyKnowledgeRetrieverTests(unittest.IsolatedAsyncioTestCase):
             "effective_at": datetime(2026, 8, 4, tzinfo=timezone.utc),
             "section_path": "报销",
             "content": "报销需要提交发票。",
+            "metadata": {},
             "similarity": 0.6,
         }
 
@@ -490,6 +493,7 @@ class CompanyKnowledgeRetrieverTests(unittest.IsolatedAsyncioTestCase):
             "effective_at": datetime(2026, 8, 4, tzinfo=timezone.utc),
             "section_path": "年假",
             "content": "员工年假应至少提前五个工作日申请。",
+            "metadata": {},
         }
         low_similarity_row = {
             "chunk_id": "chunk-1",

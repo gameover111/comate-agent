@@ -49,6 +49,8 @@ export const apiAdminCompanyKnowledgeUpdateChunkSet = (sourceId, chunkSetId, chu
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}`, { method: 'PUT', body: JSON.stringify({ chunks }) })
 export const apiAdminCompanyKnowledgeConfirmChunkSet = (sourceId, chunkSetId) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/confirm`, { method: 'POST', body: '{}' })
+export const apiAdminCompanyKnowledgeContextualizeChunkSet = (sourceId, chunkSetId) =>
+  request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/contextualize`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgeIndexChunkSet = (sourceId, chunkSetId) =>
   request(`/company-knowledge/sources/${sourceId}/chunk-sets/${chunkSetId}/index`, { method: 'POST', body: '{}' })
 export const apiAdminCompanyKnowledgePreviewChunkSet = (sourceId, chunkSetId, data) =>

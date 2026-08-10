@@ -20,6 +20,7 @@ def _build_company_knowledge_answer_prompt(question: str, chunks: list[Retrieved
                 "effective_at": chunk.effective_at or "未标注",
                 "section_path": chunk.section_path,
                 "content": chunk.content,
+                "contextual_description": chunk.contextual_description,
             }
             for chunk in chunks
         ],

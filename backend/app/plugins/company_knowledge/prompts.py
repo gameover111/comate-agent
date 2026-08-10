@@ -11,15 +11,15 @@ COMPANY_KNOWLEDGE_SYSTEM_PROMPT = """你是伴行的公司知识问答助手。
 def build_answer_prompt(question: str, chunks: list[dict]) -> str:
     sources = []
     for index, chunk in enumerate(chunks, start=1):
-        sources.append(
-            "\n".join(
-                [
-                    f"[资料 {index}] {chunk['title']}（版本 {chunk['version']}，生效 {chunk['effective_at']}）",
-                    f"章节：{chunk['section_path'] or '未标注章节'}",
-                    f"内容：{chunk['content']}",
-                ]
-            )
-        )
+        lines = [
+            f"[资料 {index}] {chunk['title']}（版本 {chunk['version']}，生效 {chunk['effective_at']}）",
+            f"章节：{chunk['section_path'] or '未标注章节'}",
+        ]
+        context = chunk.get("contextual_description") or ""
+        if context:
+            lines.append(f"上下文：{context}")
+        lines.append(f"内容：{chunk['content']}")
+        sources.append("\n".join(lines))
     return f"""用户问题：{question}
 
 可引用资料：
@@ -73,3 +73,56 @@ RAG 回答：{answer}
 {chr(10).join(evidence)}
 
 请评估该回答。"""
+
+
+CHUNK_REFINE_SYSTEM_PROMPT = """你是公司知识库的文档切分顾问，负责对"自动切分"产生的分片做语义边界裁决。
+目标：让分片成为语义完整、主题集中的片段。
+规则：
+- 只判断分片之间的合并或拆分，绝不重写、修改任何正文内容。
+- merge_with_next：当前分片与下一分片语义连续（同一主题、同一流程、同一条款），且合并后仍接近目标块长度时使用。
+- split：当前分片包含多个不相关主题时拆开；必须给出 split_at（在分片正文中的字符偏移，应落在句子边界附近）。
+- keep：无需调整。
+- 每个分片必须且只能给出一个决策，不要遗漏。
+仅返回 JSON 数组，格式为 [{"chunk_index": 0, "action": "keep|merge_with_next|split", "split_at": null, "reason": "简短原因"}]，不要输出 Markdown 或其他文字。"""
+
+
+def build_chunk_refine_prompt(source_title: str, chunks: list[dict], target_len: int) -> str:
+    """构造 LLM 边界裁决的输入：每块只送章节路径与首/尾片段，控制 token 成本。"""
+    lines = [f"资料标题：{source_title}", f"目标块长度：{target_len} 字符", "", "候选分片："]
+    for item in chunks:
+        lines.append(
+            "\n".join(
+                [
+                    f"[分片 {item['index']}] 章节：{item['section_path'] or '未标注'}，字数：{item['char_count']}",
+                    f"开头：{item['head']}",
+                    f"结尾：{item['tail']}",
+                ]
+            )
+        )
+    return "\n".join(lines)
+
+
+CONTEXTUALIZE_SYSTEM_PROMPT = """你是公司知识库的文档分片标注助手。
+为给定的分片生成 1~2 句"上下文描述"，说明这段内容在讲什么、属于哪份文档的哪个章节，帮助检索与回答时理解分片所处语境。
+要求：
+- 只做客观概括，不新增、不推测文档未表达的信息。
+- 描述要能脱离正文独立理解（例如：这是《员工考勤与休假管理制度》第四章年假部分的条款说明）。
+- 直接输出描述文本，不要输出 Markdown 或其他文字。"""
+
+
+def build_contextualize_prompt(
+    source_title: str,
+    section_path: str,
+    prev_tail: str,
+    content: str,
+    next_head: str,
+) -> str:
+    """构造单个分片上下文描述生成的输入：文档标题 + 章节 + 前后块片段 + 本块内容。"""
+    return f"""文档标题：{source_title}
+章节：{section_path or '未标注'}
+上一分片结尾：{prev_tail or '（无）'}
+本分片内容：
+{content}
+下一分片开头：{next_head or '（无）'}
+
+请为本分片生成 1~2 句上下文描述。"""

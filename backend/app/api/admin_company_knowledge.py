@@ -24,6 +24,7 @@ from app.plugins.company_knowledge.service import (
     confirm_company_knowledge_validation_run,
     confirm_chunk_set,
     confirm_preprocess_company_source,
+    contextualize_chunk_set,
     create_company_knowledge_validation_run,
     create_chunk_set,
     delete_archived_company_source,
@@ -299,6 +300,22 @@ async def confirm_source_chunk_set(
     except CompanyKnowledgeServiceError as exc:
         return fail(str(exc))
     return ok({"chunk_set": chunk_set_to_dict(chunk_set)}, "分片已确认，可以向量化")
+
+
+@router.post("/sources/{source_id}/chunk-sets/{chunk_set_id}/contextualize")
+async def contextualize_source_chunk_set(
+    source_id: str,
+    chunk_set_id: str,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        chunk_set = await contextualize_chunk_set(
+            db, source_id=source_id, chunk_set_id=chunk_set_id, admin_id=admin.id
+        )
+    except CompanyKnowledgeServiceError as exc:
+        return fail(str(exc))
+    return ok({"chunk_set": chunk_set_to_dict(chunk_set)}, "上下文描述已生成")
 
 
 @router.post("/sources/{source_id}/chunk-sets/{chunk_set_id}/index")
