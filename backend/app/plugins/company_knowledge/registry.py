@@ -47,6 +47,8 @@ KNOWLEDGE_TYPES = (
         user_visible=True,
         required_metadata=("version", "effective_at"),
         graph_expansion_enabled=True,
+        # 第二阶段先只对公司制度灰度启用；其他类型仍继承默认关闭。
+        contextual_embedding_enabled=True,
     ),
     KnowledgeTypeDefinition(
         key="faq",

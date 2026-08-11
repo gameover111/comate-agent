@@ -44,15 +44,16 @@ class CompanyKnowledgeContractTests(unittest.TestCase):
             self.assertFalse(items[key]["query_enabled"])
             self.assertFalse(items[key]["user_visible"])
 
-    def test_retrieval_enhancement_flags_are_default_off_and_independent(self):
+    def test_retrieval_enhancement_flags_keep_graph_ranking_off_and_only_gray_policy_contextual_embedding(self):
         policy = next(item for item in list_knowledge_types() if item["key"] == "policy")
 
         # 保留已经交付的关联推荐能力，不将其误当作“图谱进入 RRF”。
         self.assertTrue(policy["graph_expansion_enabled"])
-        self.assertFalse(policy["contextual_embedding_enabled"])
+        self.assertTrue(policy["contextual_embedding_enabled"])
         self.assertFalse(policy["graph_ranking_enabled"])
-        self.assertFalse(is_contextual_embedding_enabled("policy"))
+        self.assertTrue(is_contextual_embedding_enabled("policy"))
         self.assertFalse(is_graph_ranking_enabled("policy"))
+        self.assertFalse(is_contextual_embedding_enabled("faq"))
 
     def test_user_and_admin_type_interfaces_share_the_same_contract(self):
         user_response = self.client.get("/api/company-knowledge/types")
@@ -91,6 +92,32 @@ class CompanyKnowledgeContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["success"])
         delete_job.assert_awaited_once()
+
+    def test_contextual_reindex_endpoint_returns_the_switched_chunk_set(self):
+        source = SimpleNamespace(id="source-1")
+        chunk_set = SimpleNamespace(id="set-new")
+
+        with (
+            patch.object(
+                admin_company_knowledge,
+                "reindex_company_source",
+                AsyncMock(return_value=(source, chunk_set)),
+            ) as reindex,
+            patch.object(admin_company_knowledge, "source_to_dict", return_value={"id": "source-1"}),
+            patch.object(
+                admin_company_knowledge,
+                "chunk_set_to_dict",
+                return_value={"id": "set-new", "status": "published"},
+            ),
+        ):
+            response = self.client.post("/api/admin/company-knowledge/sources/source-1/reindex")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["chunk_set"]["id"], "set-new")
+        self.assertEqual(payload["data"]["chunk_set"]["status"], "published")
+        reindex.assert_awaited_once()
 
     def test_company_knowledge_messages_do_not_enter_persona_signal_input(self):
         messages = [

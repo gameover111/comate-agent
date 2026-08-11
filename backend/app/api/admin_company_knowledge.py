@@ -196,7 +196,9 @@ async def get_source(
             "markdown": source.markdown_content,
             "chunk_sets": [chunk_set_to_dict(item) for item in chunk_sets],
             "chunks": [chunk_to_dict(chunk) for chunk in chunks],
-            "selected_chunk_set_id": str(source.active_chunk_set_id) if source.active_chunk_set_id else (str(chunk_sets[0].id) if chunk_sets else None),
+            "selected_chunk_set_id": str(chunk_set_id) if chunk_set_id else (
+                str(source.active_chunk_set_id) if source.active_chunk_set_id else (str(chunk_sets[0].id) if chunk_sets else None)
+            ),
         }
     )
 
@@ -561,10 +563,13 @@ async def reindex_source(
     db: AsyncSession = Depends(get_db),
 ):
     try:
-        source = await reindex_company_source(db, source_id, admin.id)
+        source, chunk_set = await reindex_company_source(db, source_id, admin.id)
     except CompanyKnowledgeServiceError as exc:
         return fail(str(exc))
-    return ok({"source": source_to_dict(source)}, "资料已重新索引")
+    return ok(
+        {"source": source_to_dict(source), "chunk_set": chunk_set_to_dict(chunk_set)},
+        "上下文向量已重建并切换为活跃索引",
+    )
 
 
 @router.get("/jobs")
