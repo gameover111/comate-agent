@@ -19,6 +19,7 @@
       </select>
       <div v-if="detail" class="source-actions">
         <button v-if="detail.source.status !== 'published' && detail.source.status !== 'indexing'" class="row-btn" @click="openEdit">编辑</button>
+        <button v-if="canContextualReindex" class="row-btn moss" :disabled="reindexing" @click="contextualReindex">{{ reindexing ? '重建中…' : '重建上下文向量' }}</button>
         <button v-if="detail.source.status === 'archived'" class="row-btn moss" :disabled="sourceActing" @click="restoreSource">上架</button>
         <button v-if="detail.source.status !== 'archived' && detail.source.status !== 'indexing'" class="row-btn danger" :disabled="sourceActing" @click="archiveSource">下架</button>
         <button v-if="detail.source.status === 'archived'" class="row-btn danger" :disabled="sourceActing" @click="removeSource">删除</button>
@@ -96,6 +97,7 @@
           <div>
             <h2>分片草稿</h2>
             <p>{{ modeLabel(selectedSet.mode) }} · {{ statusLabel(selectedSetDisplayStatus) }} · {{ editable ? '可以编辑' : '已锁定' }}</p>
+            <p v-if="embeddingProfileText(selectedSet)" class="embedding-profile">{{ embeddingProfileText(selectedSet) }}</p>
           </div>
           <div v-if="editable" class="workspace-actions">
             <button class="btn-ghost" @click="addChunk">新增分片</button>
@@ -272,8 +274,10 @@ import {
   apiAdminCompanyKnowledgePreprocessConfirm,
   apiAdminCompanyKnowledgePreprocessSkip,
   apiAdminCompanyKnowledgePublish,
+  apiAdminCompanyKnowledgeReindex,
   apiAdminCompanyKnowledgeSource,
   apiAdminCompanyKnowledgeSources,
+  apiAdminCompanyKnowledgeTypes,
   apiAdminCompanyKnowledgeUpdate,
   apiAdminCompanyKnowledgeUpdateChunkSet,
   apiAdminCompanyKnowledgeUpload,
@@ -293,6 +297,7 @@ const creating = ref(false)
 const saving = ref(false)
 const indexing = ref(false)
 const contextualizing = ref(false)
+const reindexing = ref(false)
 const runningValidation = ref(false)
 const confirmingValidation = ref(false)
 const sourceActing = ref(false)
@@ -316,6 +321,7 @@ const editOpen = ref(false)
 const savingEdit = ref(false)
 const edit = ref(emptyEdit())
 const jobs = ref([])
+const knowledgeTypes = ref([])
 const deletingJobId = ref('')
 const modes = [
   { key: 'auto', label: '自动切分', desc: '按 Markdown 标题和长度生成草稿' },
@@ -324,6 +330,8 @@ const modes = [
 ]
 
 const selectedSet = computed(() => detail.value?.chunk_sets.find((item) => item.id === activeChunkSetId.value) || null)
+const selectedKnowledgeType = computed(() => knowledgeTypes.value.find((item) => item.key === detail.value?.source?.knowledge_type) || null)
+const canContextualReindex = computed(() => detail.value?.source?.status === 'published' && selectedKnowledgeType.value?.contextual_embedding_enabled === true)
 const selectedSetDisplayStatus = computed(() => chunkSetDisplayStatus(selectedSet.value))
 const editable = computed(() => selectedSetDisplayStatus.value === 'draft' && detail.value?.source.status !== 'archived')
 const verificationChunks = computed(() => detail.value?.chunks || [])
@@ -343,7 +351,7 @@ function statusLabel(value) {
 function statusClass(value) {
   return ({ published: 'badge-moss', succeeded: 'badge-moss', pass: 'badge-moss', indexed: 'badge-gold', validated: 'badge-gold', markdown_ready: 'badge-gold', preprocessed: 'badge-gold', chunking: 'badge-gold', chunk_ready: 'badge-gold', indexing: 'badge-gold', running: 'badge-gold', skipped: 'badge-gold', failed: 'badge-berry', fail: 'badge-berry', archived: 'badge-berry' }[value] || '')
 }
-function modeLabel(value) { return ({ auto: '自动切分', manual: '手动切分', auto_then_manual: '自动后调优', legacy: '历史分片' }[value] || value) }
+function modeLabel(value) { return ({ auto: '自动切分', manual: '手动切分', auto_then_manual: '自动后调优', contextual_reindex: '上下文向量重建', legacy: '历史分片' }[value] || value) }
 function validationModeLabel() { return '人工验证' }
 function evaluationLabel(value) { return ({ pass: '通过', fail: '未通过', pending: '待评估', skipped: '未评估' }[value] || value || '未评估') }
 function chunkSetDisplayStatus(chunkSet) {
@@ -353,6 +361,13 @@ function chunkSetDisplayStatus(chunkSet) {
 function jobLabel(value) { return ({ convert: '转换 Markdown', auto_chunk: '自动切分', manual_chunk: '手动切分', index: '显式向量化', reindex: '重新索引', graph_extract: '生成关系草稿' }[value] || value) }
 function formatDate(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
 function formatOptionalSimilarity(value) { return value === null || value === undefined ? '—' : Number(value).toFixed(4) }
+function embeddingProfileText(chunkSet) {
+  const profiles = chunkSet?.embedding_profiles || {}
+  const contextual = profiles.contextual_v1 || 0
+  const contentOnly = profiles.content_only || 0
+  if (!contextual && !contentOnly) return ''
+  return `向量档案：上下文 + 正文 ${contextual} 段；仅正文（描述缺失时回退）${contentOnly} 段`
+}
 function showNotice(text, type = 'success') { notice.value = { text, type } }
 function goKnowledge() { router.push('/company-knowledge') }
 function replaceSourceQuery(id) { router.replace({ query: id ? { source: id } : {} }) }
@@ -435,6 +450,10 @@ async function loadSources() {
 async function loadJobs() {
   const res = await apiAdminCompanyKnowledgeJobs()
   if (res.success) jobs.value = res.data.items
+}
+async function loadKnowledgeTypes() {
+  const res = await apiAdminCompanyKnowledgeTypes()
+  if (res.success) knowledgeTypes.value = res.data.items || []
 }
 async function fetchValidationRuns(targetSourceId, targetChunkSetId) {
   const res = await apiAdminCompanyKnowledgeValidationRuns(targetSourceId, targetChunkSetId)
@@ -676,6 +695,20 @@ async function contextualizeDraft() {
   } catch (error) { showNotice(error.message || '生成失败', 'error') } finally { contextualizing.value = false }
 }
 
+async function contextualReindex() {
+  const source = detail.value?.source
+  if (!source || !confirm('将复制当前活跃分片并按“上下文描述 + 正文”重建向量。全部成功后自动切换活跃索引；缺少描述的分片会保留仅正文向量。是否继续？')) return
+  reindexing.value = true
+  try {
+    const res = await apiAdminCompanyKnowledgeReindex(source.id)
+    if (!res.success) { showNotice(res.message || '重建失败，原索引未变更', 'error'); return }
+    activeChunkSetId.value = res.data.chunk_set.id
+    await Promise.all([loadSources(), loadJobs()])
+    await loadDetail()
+    showNotice('上下文向量重建完成，已切换活跃索引。')
+  } catch (error) { showNotice(error.message || '重建失败，原索引未变更', 'error') } finally { reindexing.value = false }
+}
+
 async function indexDraft() {
   if (!selectedSet.value || !confirm('开始调用 Embedding 模型向量化这些已确认分片？')) return
   indexing.value = true
@@ -784,7 +817,7 @@ watch(() => route.query.source, (value) => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadSources(), loadJobs()])
+  await Promise.all([loadSources(), loadJobs(), loadKnowledgeTypes()])
   if (typeof route.query.source === 'string') sourceId.value = route.query.source
   if (sourceId.value) await loadDetail()
 })
@@ -809,6 +842,7 @@ onBeforeUnmount(() => stopValidationPolling({ clearPending: true }))
 .source-head { margin:22px 0 12px; }
 .source-head h2, .workspace-head h2 { font-size:16px; }
 .source-head p, .workspace-head p, .jobs-head p { margin-top:4px; color:var(--ink-soft); font-size:12px; }
+.workspace-head .embedding-profile { color:var(--moss); }
 .set-select { max-width:280px; padding:7px 9px; font-size:12px; }
 .markdown-source { margin-bottom:14px; border:1px solid var(--line); border-radius:6px; background:var(--card); }
 .markdown-source summary { cursor:pointer; padding:10px 12px; color:var(--ink-soft); font-size:13px; }

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -31,7 +32,18 @@ from app.plugins.company_knowledge.prompts import (
     build_validation_evaluation_prompt,
 )
 from app.plugins.company_knowledge.preprocessor import preprocess_markdown
-from app.plugins.company_knowledge.registry import get_knowledge_type, is_import_enabled
+from app.plugins.company_knowledge.embedding_profile import (
+    EMBEDDING_PROFILE_CONTEXTUAL_V1,
+    EmbeddingInput,
+    build_embedding_input,
+    get_embedding_profile,
+    with_embedding_profile,
+)
+from app.plugins.company_knowledge.registry import (
+    get_knowledge_type,
+    is_contextual_embedding_enabled,
+    is_import_enabled,
+)
 from app.plugins.company_knowledge.retriever import (
     MIN_SIMILARITY,
     RetrievedChunk,
@@ -80,13 +92,16 @@ def source_to_dict(source: CompanyKnowledgeSource) -> dict:
 
 
 def chunk_set_to_dict(chunk_set: CompanyKnowledgeChunkSet) -> dict:
+    rule_snapshot = chunk_set.rule_snapshot or {}
+    embedding_snapshot = rule_snapshot.get("embedding") or {}
     return {
         "id": str(chunk_set.id),
         "source_id": str(chunk_set.source_id),
         "markdown_version": chunk_set.markdown_version,
         "mode": chunk_set.mode,
         "status": chunk_set.status,
-        "rule_snapshot": chunk_set.rule_snapshot or {},
+        "rule_snapshot": rule_snapshot,
+        "embedding_profiles": embedding_snapshot.get("profiles") or {},
         "total_chunks": chunk_set.total_chunks,
         "indexed_chunks": chunk_set.indexed_chunks,
         "error_message": chunk_set.error_message or "",
@@ -105,6 +120,9 @@ def chunk_to_dict(chunk: CompanyKnowledgeChunk) -> dict:
         "content": chunk.content,
         "token_count": chunk.token_count,
         "status": chunk.status,
+        # 历史分片未记录档案时按 content_only 返回，避免管理端将它误解为上下文化向量。
+        "embedding_profile": get_embedding_profile(chunk.metadata_),
+        "has_contextual_description": bool((chunk.metadata_ or {}).get("contextual_description")),
     }
 
 
@@ -220,19 +238,88 @@ async def import_company_source(
     return source
 
 
-async def reindex_company_source(db: AsyncSession, source_id: str, admin_id) -> CompanyKnowledgeSource:
+async def reindex_company_source(
+    db: AsyncSession,
+    source_id: str,
+    admin_id,
+) -> tuple[CompanyKnowledgeSource, CompanyKnowledgeChunkSet]:
+    """复制活跃分片并重建上下文化向量，成功后再切换线上索引。
+
+    不重新切分正文，以便真实对比只包含 embedding 输入的变化。外部模型调用失败时，
+    ``index_chunk_set`` 会回滚新分片的向量写入；本函数不会改动原 active chunk set。
+    """
     source = await _get_source(db, source_id)
-    chunk_set = await create_chunk_set(
-        db,
-        source_id=source_id,
-        mode="auto",
-        rule={"max_chars": 500, "overlap_chars": 100},
-        chunks=None,
-        admin_id=admin_id,
+    if source.status != "published" or not source.active_chunk_set_id:
+        raise CompanyKnowledgeServiceError("只有已发布且已有活跃索引的资料可以重建上下文向量")
+    if not is_contextual_embedding_enabled(source.knowledge_type):
+        raise CompanyKnowledgeServiceError("该资料类型尚未启用上下文向量重建")
+
+    previous_set = await db.get(CompanyKnowledgeChunkSet, source.active_chunk_set_id)
+    if not previous_set or previous_set.status != "published":
+        raise CompanyKnowledgeServiceError("当前活跃分片版本不可用于重建")
+    rows = await db.execute(
+        select(CompanyKnowledgeChunk)
+        .where(CompanyKnowledgeChunk.chunk_set_id == previous_set.id)
+        .order_by(CompanyKnowledgeChunk.chunk_index.asc())
     )
-    await confirm_chunk_set(db, source_id=source_id, chunk_set_id=str(chunk_set.id), admin_id=admin_id)
-    await index_chunk_set(db, source_id=source_id, chunk_set_id=str(chunk_set.id), admin_id=admin_id)
-    return await _get_source(db, source_id)
+    previous_chunks = rows.scalars().all()
+    if not previous_chunks:
+        raise CompanyKnowledgeServiceError("当前活跃分片版本没有可重建的内容")
+
+    chunk_set = CompanyKnowledgeChunkSet(
+        source_id=source.id,
+        markdown_version=source.markdown_version,
+        mode="contextual_reindex",
+        status="confirmed",
+        rule_snapshot={
+            "reindex_of": str(previous_set.id),
+            "embedding_target": EMBEDDING_PROFILE_CONTEXTUAL_V1,
+            "fallback_profile": "content_only",
+        },
+        created_by=admin_id,
+        confirmed_by=admin_id,
+        confirmed_at=datetime.now(timezone.utc),
+        total_chunks=len(previous_chunks),
+    )
+    db.add(chunk_set)
+    await db.flush()
+    db.add_all(
+        [
+            CompanyKnowledgeChunk(
+                source_id=source.id,
+                chunk_set_id=chunk_set.id,
+                chunk_index=item.chunk_index,
+                section_path=item.section_path,
+                content=item.content,
+                content_hash=item.content_hash,
+                token_count=item.token_count,
+                status="draft",
+                # 保留已生成的描述；未生成的分片将在本次向量化中安全回退为正文。
+                metadata_=dict(item.metadata_ or {}),
+            )
+            for item in previous_chunks
+        ]
+    )
+    await db.commit()
+
+    try:
+        indexed_set = await index_chunk_set(
+            db,
+            source_id=source_id,
+            chunk_set_id=str(chunk_set.id),
+            admin_id=admin_id,
+        )
+    except Exception:
+        # 新分片仍保持非活跃，旧向量与检索链路不受影响。
+        raise
+
+    previous_set.status = "superseded"
+    indexed_set.status = "published"
+    source.active_chunk_set_id = indexed_set.id
+    await db.commit()
+    await db.refresh(source)
+    await db.refresh(indexed_set)
+    return source, indexed_set
 
 
 async def publish_company_source(db: AsyncSession, source_id: str, admin_id) -> CompanyKnowledgeSource:
@@ -739,13 +826,19 @@ async def index_chunk_set(
         raise CompanyKnowledgeServiceError("该分片版本没有有效内容")
 
     previous_source_status = source.status
+    contextual_embedding_enabled = is_contextual_embedding_enabled(source.knowledge_type)
+    is_contextual_reindex = chunk_set.mode == "contextual_reindex"
     job = CompanyKnowledgeJob(
         source_id=source.id,
         chunk_set_id=chunk_set.id,
-        job_type="index",
+        job_type="reindex" if is_contextual_reindex else "index",
         status="running",
         requested_by=admin_id,
         total_chunks=len(chunks),
+        request_snapshot={
+            "contextual_embedding_enabled": contextual_embedding_enabled,
+            "reindex_of": (chunk_set.rule_snapshot or {}).get("reindex_of"),
+        },
         started_at=datetime.now(timezone.utc),
     )
     chunk_set.status = "indexing"
@@ -755,15 +848,31 @@ async def index_chunk_set(
     await db.commit()
 
     try:
-        vectors = await _embed_chunks(chunks)
-        for chunk, vector in zip(chunks, vectors, strict=True):
+        embedding_items = await _embed_chunks(
+            chunks,
+            contextual_embedding_enabled=contextual_embedding_enabled,
+        )
+        profiles = Counter(item.profile for _, item in embedding_items)
+        for chunk, (vector, input_item) in zip(chunks, embedding_items, strict=True):
             chunk.embedding = vector
             chunk.status = "indexed"
+            chunk.metadata_ = with_embedding_profile(chunk.metadata_, input_item.profile)
         chunk_set.status = "indexed"
         chunk_set.indexed_chunks = len(chunks)
         chunk_set.indexed_at = datetime.now(timezone.utc)
+        chunk_set.rule_snapshot = {
+            **(chunk_set.rule_snapshot or {}),
+            "embedding": {
+                "contextual_embedding_enabled": contextual_embedding_enabled,
+                "profiles": dict(profiles),
+            },
+        }
         job.status = "succeeded"
         job.succeeded_chunks = len(chunks)
+        job.request_snapshot = {
+            **(job.request_snapshot or {}),
+            "embedding_profiles": dict(profiles),
+        }
         job.finished_at = datetime.now(timezone.utc)
         if previous_source_status != "published":
             source.status = "indexed"
@@ -1371,15 +1480,27 @@ async def _replace_chunk_items(
     await db.flush()
 
 
-async def _embed_chunks(chunks: list[CompanyKnowledgeChunk]) -> list[list[float]]:
-    vectors: list[list[float]] = []
+async def _embed_chunks(
+    chunks: list[CompanyKnowledgeChunk],
+    *,
+    contextual_embedding_enabled: bool,
+) -> list[tuple[list[float], EmbeddingInput]]:
+    result: list[tuple[list[float], EmbeddingInput]] = []
     for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
         batch = chunks[start:start + EMBEDDING_BATCH_SIZE]
-        batch_vectors = await get_embeddings_batch([chunk.content for chunk in batch])
+        inputs = [
+            build_embedding_input(
+                chunk.content,
+                (chunk.metadata_ or {}).get("contextual_description"),
+                contextual_embedding_enabled=contextual_embedding_enabled,
+            )
+            for chunk in batch
+        ]
+        batch_vectors = await get_embeddings_batch([item.text for item in inputs])
         if not batch_vectors or len(batch_vectors) != len(batch):
             raise CompanyKnowledgeServiceError("向量生成失败")
-        vectors.extend(batch_vectors)
-    return vectors
+        result.extend(zip(batch_vectors, inputs, strict=True))
+    return result
 
 
 def _normalize_chunk_rule(rule: dict | None) -> dict:

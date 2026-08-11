@@ -89,10 +89,33 @@ def rrf_merge(
 
     score(doc) = Σ 1 / (k + rank_i)
     """
+    return rrf_merge_weighted(
+        [(vector_ranked, 1.0), (keyword_ranked, 1.0)],
+        k=k,
+        limit=limit,
+    )
+
+
+def rrf_merge_weighted(
+    rankings: list[tuple[list[str], float]],
+    *,
+    k: int = 60,
+    limit: int = 6,
+    allowed_ids: set[str] | None = None,
+) -> list[str]:
+    """对多路排序做带权 RRF 融合。
+
+    ``weight`` 只用于降低补充信号（如图谱扩展）的影响；主检索的向量与
+    BM25 仍保持 1.0。``allowed_ids`` 允许调用方将最终竞争范围收敛在
+    已验证的基础命中及受限扩展候选中，避免扩大候选池改变原有召回语义。
+    """
     fused: dict[str, float] = {}
-    for rank, chunk_id in enumerate(vector_ranked, start=1):
-        fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (k + rank)
-    for rank, chunk_id in enumerate(keyword_ranked, start=1):
-        fused[chunk_id] = fused.get(chunk_id, 0.0) + 1.0 / (k + rank)
+    for ranked_ids, weight in rankings:
+        if weight <= 0:
+            continue
+        for rank, chunk_id in enumerate(ranked_ids, start=1):
+            fused[chunk_id] = fused.get(chunk_id, 0.0) + float(weight) / (k + rank)
+    if allowed_ids is not None:
+        fused = {chunk_id: score for chunk_id, score in fused.items() if chunk_id in allowed_ids}
     ordered = sorted(fused.items(), key=lambda item: (-item[1], item[0]))
     return [chunk_id for chunk_id, _ in ordered[:limit]]
