@@ -50,7 +50,8 @@ async def _build_related_sources(
     kt = get_knowledge_type(knowledge_type)
     if not kt or not kt.graph_expansion_enabled:
         return []
-    source_ids = sorted({chunk.source_id for chunk in chunks})
+    # 图谱排序已使用的一跳候选不应再次作为种子，否则推荐会越过一跳边界。
+    source_ids = sorted({chunk.source_id for chunk in chunks if chunk.retrieval_origin == "direct"})
     if not source_ids:
         return []
     relations = await get_confirmed_relations(db, source_ids)

@@ -486,6 +486,21 @@ class RelatedSourcesTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, [])
 
+    async def test_graph_ranked_chunk_does_not_trigger_a_second_hop_recommendation(self):
+        from app.api.company_knowledge import _build_related_sources
+        from app.api import company_knowledge as module
+
+        graph_chunk = self._chunk(self.SRC_B, chunk_id="graph-candidate")
+        graph_chunk = type(graph_chunk)(
+            **{**graph_chunk.__dict__, "retrieval_origin": "graph"}
+        )
+        db = AsyncMock()
+        with patch.object(module, "get_confirmed_relations", AsyncMock(return_value=[])) as get_relations:
+            result = await _build_related_sources(db, [self._chunk(self.SRC_A), graph_chunk], "policy")
+
+        self.assertEqual(result, [])
+        get_relations.assert_awaited_once_with(db, [self.SRC_A])
+
 
 if __name__ == "__main__":
     unittest.main()

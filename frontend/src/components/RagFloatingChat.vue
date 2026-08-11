@@ -77,7 +77,7 @@
               >
                 <span>
                   <b>{{ source.title }}</b>
-                  <small>{{ source.section_path || '未标注章节' }} · {{ source.version }} · {{ source.effective_at || '未标注生效日期' }}</small>
+                  <small>{{ source.section_path || '未标注章节' }} · {{ source.version }} · {{ source.effective_at || '未标注生效日期' }}<em v-if="source.retrieval_origin === 'graph'">图谱扩展 · {{ source.graph_relation_label || '关联' }}</em></small>
                 </span>
                 <i>{{ expandedCitation?.messageId === message.localId && expandedCitation?.index === index ? '收起' : '片段' }}</i>
               </button>
@@ -561,6 +561,7 @@ defineExpose({ applyVoiceTranscript, setVoiceHint, clearPersistedState, loadHist
 .rag-citation b, .rag-citation small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .rag-citation b { color:#315A4A; font-size:11px; }
 .rag-citation small { margin-top:2px; color:#7B8B83; font-size:10px; }
+.rag-citation small em { margin-left:5px; color:#B8860B; font-style:normal; }
 .rag-citation i { flex-shrink:0; color:#2F745B; font-size:10px; font-style:normal; }
 .rag-citation-excerpt { margin-top:3px; padding:7px; border-radius:5px; background:#F5F8F5; color:#52675D; font-size:11px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; }
 .rag-typing { display:flex; gap:4px; padding:8px 2px; }
