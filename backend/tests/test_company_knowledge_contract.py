@@ -12,7 +12,11 @@ from app.api.admin_auth import get_current_admin
 from app.api.deps import get_current_user
 from app.db.session import MIGRATION_SQL
 from app.plugins.company_knowledge.memory_boundary import profile_safe_messages
-from app.plugins.company_knowledge.registry import list_knowledge_types
+from app.plugins.company_knowledge.registry import (
+    is_contextual_embedding_enabled,
+    is_graph_ranking_enabled,
+    list_knowledge_types,
+)
 from app.plugins.company_knowledge.schemas import CompanyKnowledgeQueryRequest
 
 
@@ -39,6 +43,16 @@ class CompanyKnowledgeContractTests(unittest.TestCase):
             self.assertFalse(items[key]["import_enabled"])
             self.assertFalse(items[key]["query_enabled"])
             self.assertFalse(items[key]["user_visible"])
+
+    def test_retrieval_enhancement_flags_are_default_off_and_independent(self):
+        policy = next(item for item in list_knowledge_types() if item["key"] == "policy")
+
+        # 保留已经交付的关联推荐能力，不将其误当作“图谱进入 RRF”。
+        self.assertTrue(policy["graph_expansion_enabled"])
+        self.assertFalse(policy["contextual_embedding_enabled"])
+        self.assertFalse(policy["graph_ranking_enabled"])
+        self.assertFalse(is_contextual_embedding_enabled("policy"))
+        self.assertFalse(is_graph_ranking_enabled("policy"))
 
     def test_user_and_admin_type_interfaces_share_the_same_contract(self):
         user_response = self.client.get("/api/company-knowledge/types")

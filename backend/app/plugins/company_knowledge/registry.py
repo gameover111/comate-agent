@@ -13,8 +13,12 @@ class KnowledgeTypeDefinition:
     query_enabled: bool
     user_visible: bool
     required_metadata: tuple[str, ...] = ()
-    # B4 图谱增强检索开关：命中后沿已确认关系扩展关联来源（默认关，可按类型灰度）
+    # 已有的图谱关联推荐开关：命中后展示已确认的一跳关联资料。
     graph_expansion_enabled: bool = False
+    # A3 强化：描述 + 正文 embedding，默认关闭，后续仅通过受控 reindex 生效。
+    contextual_embedding_enabled: bool = False
+    # B4 强化：图谱候选进入 RRF 排序，独立于关联推荐，默认关闭。
+    graph_ranking_enabled: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -27,6 +31,8 @@ class KnowledgeTypeDefinition:
             "user_visible": self.user_visible,
             "required_metadata": list(self.required_metadata),
             "graph_expansion_enabled": self.graph_expansion_enabled,
+            "contextual_embedding_enabled": self.contextual_embedding_enabled,
+            "graph_ranking_enabled": self.graph_ranking_enabled,
         }
 
 
@@ -101,3 +107,13 @@ def is_import_enabled(key: str) -> bool:
 def is_query_enabled(key: str) -> bool:
     item = get_knowledge_type(key)
     return bool(item and item.query_enabled)
+
+
+def is_contextual_embedding_enabled(key: str) -> bool:
+    item = get_knowledge_type(key)
+    return bool(item and item.contextual_embedding_enabled)
+
+
+def is_graph_ranking_enabled(key: str) -> bool:
+    item = get_knowledge_type(key)
+    return bool(item and item.graph_ranking_enabled)

@@ -32,6 +32,7 @@ from app.plugins.company_knowledge.prompts import (
 )
 from app.plugins.company_knowledge.preprocessor import preprocess_markdown
 from app.plugins.company_knowledge.registry import get_knowledge_type, is_import_enabled
+from app.plugins.company_knowledge.embedding_profile import get_embedding_profile
 from app.plugins.company_knowledge.retriever import (
     MIN_SIMILARITY,
     RetrievedChunk,
@@ -105,6 +106,9 @@ def chunk_to_dict(chunk: CompanyKnowledgeChunk) -> dict:
         "content": chunk.content,
         "token_count": chunk.token_count,
         "status": chunk.status,
+        # 历史分片未记录档案时按 content_only 返回，避免管理端将它误解为上下文化向量。
+        "embedding_profile": get_embedding_profile(chunk.metadata_),
+        "has_contextual_description": bool((chunk.metadata_ or {}).get("contextual_description")),
     }
 
 
